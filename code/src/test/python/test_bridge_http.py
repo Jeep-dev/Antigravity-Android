@@ -39,10 +39,9 @@ MODELS = [('gemini-4-argon-medium', 'Gemini 4 Argon (Medium)'), ('gemini-4-argon
           ('claude-opus-5-5-low', 'Claude Opus 5.5 (Low)'), ('gpt-oss-120b-medium', 'GPT-OSS 120B (Medium)')]
 if a[:1] == ['--version']:
     print('9.9.9'); sys.exit(0)
-if a[:1] == ['models']:
-    for mid, name in MODELS:
-        print('%-30s %s' % (mid, name))
-    sys.exit(0)
+if a[:1] == ['models']:  # as the real one: it wants the terminal's own sign-in, which the app's is not
+    sys.stderr.write('Fetching available models...\nError: Please sign in to view available models. Launch the CLI without arguments to sign in.\n')
+    sys.exit(1)
 if a[:2] == ['acp', '--login']:
     print('Open this link in a browser to log in with Google:\n\n  https://accounts.google.com/o/oauth2/auth?client_id=x&state=y\n')
     sys.stdout.write('Then paste the authorization code, or the full URL of the page you land on, and press Enter: ')
@@ -365,6 +364,8 @@ def main():
     call('GET', '/account')
     wait_for(lambda: bridge.read_json(bridge.MODELS_FILE, {}).get('models') and not bridge.models_lock.locked())
     call('GET', '/config')
+    # the session made to read them is gone again: no file of it, not in the list
+    note('conversations after reading the models', sorted(os.listdir(os.path.join(home, '.gemini', 'antigravity-cli', 'conversations'))))
     note('model ids', [bridge.model_id_for(b, e) for b, e in (('gemini-4-argon', 'high'), ('gemini-4-argon', 'xhigh'),
                                                               ('gemini-4-hydrogen', 'low'), ('gpt-oss-120b-medium', 'high'),
                                                               ('claude-opus-5-5', None), ('unknown-model', 'high'), (None, 'high'))])

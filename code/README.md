@@ -1,4 +1,4 @@
-# Antigravity for Android (v0.1.0)
+# Antigravity for Android (v0.1.1)
 
 Google's Antigravity CLI (`agy`) on the phone in one app, no Termux needed: its own application id
 (`com.jeep.antigravity`), name and icon. No WebView: the interface is plain Android views (Java), so
@@ -50,9 +50,11 @@ Protocol (`agy acp`).
   prompt before it, at which point the app shows it as a message of the conversation. It cannot be
   taken back then.
 - Models: agy lists each model at each of its thinking levels ("Gemini 4 Argon (High)" is
-  `gemini-4-argon-high`). The bridge lists them to the app as one model with its levels (from `agy
-  models`, and from each session's answer), and gives agy the id for the model and level picked (the
-  nearest level the model has).
+  `gemini-4-argon-high`). The bridge lists them to the app as one model with its levels, and gives
+  agy the id for the model and level picked (the nearest level the model has). agy tells them only
+  with a session (`agy models` wants the terminal's own sign-in, not `agy acp --login`'s): after a
+  sign-in the bridge makes one, reads them, and deletes it at once; each session's answer brings
+  them again.
 - Signing in: Settings → 账号 → 用 Google 登录 has the bridge run `agy acp --login` under a
   pseudo-terminal: the link it prints is opened in the browser, and the code the page shows after
   signing in is pasted in the app and written to it. A Gemini API key is kept in

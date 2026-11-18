@@ -30,7 +30,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 1  # Bridge VERSION in the app: an app update replaces an older running bridge
+VERSION = 2  # Bridge VERSION in the app: an app update replaces an older running bridge
 HOME = os.path.expanduser('~')
 GEMINI_DIR = os.path.join(HOME, '.gemini')
 AGY_DIR = os.environ.get('AGY_DATA_DIR') or os.path.join(GEMINI_DIR, 'antigravity-cli')
@@ -280,6 +280,11 @@ def model_id_for(base, effort):
     return base
 
 
+def models_stamp():
+    """What agy's models depend on: agy itself and how it is signed in."""
+    return file_stamp(os.path.realpath(agy_path()), TOKEN_FILE, AGY_SETTINGS, KEY_FILE)
+
+
 def keep_models(models_block):
     """Keeps agy's model list from a session's answer (session/new, session/load)."""
     if not isinstance(models_block, dict):
@@ -291,7 +296,7 @@ def keep_models(models_block):
     current = models_block.get('currentModelId') or ''
     saved = read_json(MODELS_FILE, {})
     models = group_models(listed)
-    data = {'models': models, 'current': current or saved.get('current', ''), 'stamp': saved.get('stamp')}
+    data = {'models': models, 'current': current or saved.get('current', ''), 'stamp': models_stamp()}
     if data != saved:
         try:
             write_json(MODELS_FILE, data)
@@ -302,37 +307,47 @@ def keep_models(models_block):
 
 
 models_lock = threading.Lock()
+models_tried = 0.0  # when agy's models were last asked for and not given
 
 
 def find_models():
-    """agy's models from `agy models`, asked again when agy or its sign-in changes (kept in MODELS_FILE)."""
+    """agy's models, asked again when agy or its sign-in changes (kept in MODELS_FILE). agy gives
+    them only with a session (`agy models` wants the terminal's own sign-in, not the app's): one is
+    made for it, read, and deleted at once."""
+    global models_tried
     if not models_lock.acquire(blocking=False):
         return
+    sid = None
     try:
-        stamp = file_stamp(os.path.realpath(agy_path()), TOKEN_FILE, AGY_SETTINGS, KEY_FILE)
         saved = read_json(MODELS_FILE, {})
-        if saved.get('stamp') == stamp or not os.path.exists(agy_path()) or not signed_in():
+        if (saved.get('models') and saved.get('stamp') == models_stamp()) or not os.path.exists(agy_path()) \
+                or not signed_in() or time.time() - models_tried < 60:
             return
-        try:
-            out = subprocess.run([agy_path(), 'models'], capture_output=True, text=True, timeout=90, env=agy_env(),
-                                 cwd=HOME, stdin=subprocess.DEVNULL).stdout
-        except (OSError, subprocess.SubprocessError) as e:
-            log('models: %s' % e)
-            return
-        listed = []
-        for line in out.splitlines():
-            m = re.match(r'^\s*([A-Za-z0-9][\w.:-]*)\s{2,}(\S.*?)\s*$', line)
-            if m:
-                listed.append((m.group(1), m.group(2)))
-        if not listed:
-            log('models: agy listed none: %s' % out.strip()[:300])
-            return
-        write_json(MODELS_FILE, {'models': group_models(listed), 'current': saved.get('current', ''), 'stamp': stamp})
-        log('models: %d' % len(listed))
+        agy.ensure()
+        os.makedirs(DEFAULT_CWD, exist_ok=True)
+        result = agy.request('session/new', {'cwd': DEFAULT_CWD, 'mcpServers': []}, timeout=90) or {}
+        sid = result.get('sessionId')
+        keep_models(result.get('models'))
+        with agy.lock:
+            early = agy.early.pop(sid, []) if sid else []
+        for u in early:
+            if u.get('sessionUpdate') == 'available_commands_update':
+                remember_commands([c.get('name') for c in u.get('availableCommands') or [] if isinstance(c, dict) and c.get('name')])
+        models = read_json(MODELS_FILE, {}).get('models', [])
+        log('models: %d' % len(models))
+        if not models:
+            models_tried = time.time()
         hub.emit('', 'config')
-    except OSError as e:
-        log('models: %s' % e)
+    except (AgyError, RpcError, OSError) as e:
+        models_tried = time.time()
+        log('models: not read: %s' % e)
     finally:
+        if sid:
+            try:
+                agy.request('session/close', {'sessionId': sid}, timeout=10)
+            except (AgyError, RpcError):
+                pass
+            remove_session_files(sid)
         models_lock.release()
 
 
@@ -1619,6 +1634,13 @@ def delete_session(session_id):
             except (AgyError, RpcError) as e:
                 log('session %s not closed: %s' % (session_id, e))
     found = session_row(session_id) is not None
+    remove_session_files(session_id)
+    return found or bool(gone)
+
+
+def remove_session_files(session_id):
+    """A session's line in agy's list, its files and what is kept here of it, taken out (and it
+    remembered as deleted, should agy list it again)."""
     hidden = read_json(HIDDEN_FILE, [])
     if session_id not in hidden:
         write_json(HIDDEN_FILE, (hidden + [session_id])[-2000:])
@@ -1642,7 +1664,6 @@ def delete_session(session_id):
         os.remove(history_path(session_id))
     except OSError:
         pass
-    return found or bool(gone)
 
 
 def delete_all():

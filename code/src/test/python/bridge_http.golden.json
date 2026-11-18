@@ -6,7 +6,7 @@
     "defaultCwd": "<T>/home/work",
     "home": "<T>/home",
     "ok": true,
-    "version": 1
+    "version": 2
    },
    "req": "GET /health ",
    "status": 200
@@ -256,9 +256,12 @@
      }
     ],
     "claudeVersion": "9.9.9",
-    "commands": [],
-    "defaultModel": "",
-    "effort": "",
+    "commands": [
+     "goal",
+     "compact"
+    ],
+    "defaultModel": "gemini-4-argon",
+    "effort": "medium",
     "efforts": [
      "low",
      "medium",
@@ -281,6 +284,11 @@
    },
    "req": "GET /config ",
    "status": 200
+  },
+  {
+   "body": [],
+   "req": "conversations after reading the models",
+   "status": 0
   },
   {
    "body": [
