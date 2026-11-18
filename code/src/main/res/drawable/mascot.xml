@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A pixel chevron lifting off a short bar (13×8), in the text's colour. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="52dp" android:height="32dp" android:viewportWidth="13" android:viewportHeight="8">
+    <path android:fillColor="@color/text" android:pathData="M5,0h3v2h-3zM3,2h3v2h-3zM1,4h3v2h-3zM7,2h3v2h-3zM9,4h3v2h-3zM4,7h5v1h-5z" />
+</vector>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The pixel chevron lifting off its bar, inside the adaptive icon's safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#EEF2FA" android:pathData="M45.5,32h16.5v11h-16.5zM34.5,43h16.5v11h-16.5zM23.5,54h16.5v11h-16.5zM56.5,43h16.5v11h-16.5zM67.5,54h16.5v11h-16.5z" />
+    <path android:fillColor="#8AB4F8" android:pathData="M40,70.5h27.5v5.5h-27.5z" />
+</vector>

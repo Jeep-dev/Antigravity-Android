@@ -1,0 +1,1319 @@
+{
+ "records": [
+  {
+   "body": {
+    "agy": "<T>/bin/agy",
+    "defaultCwd": "<T>/home/work",
+    "home": "<T>/home",
+    "ok": true,
+    "version": 1
+   },
+   "req": "GET /health ",
+   "status": 200
+  },
+  {
+   "body": {
+    "account": {
+     "email": "",
+     "method": "",
+     "signedIn": false
+    },
+    "agyVersion": "9.9.9",
+    "auth": false,
+    "claudeModels": [],
+    "claudeVersion": "9.9.9",
+    "commands": [],
+    "defaultModel": "",
+    "effort": "",
+    "efforts": [],
+    "installed": true,
+    "models": [],
+    "permissionModes": [
+     "default",
+     "acceptEdits",
+     "plan",
+     "bypassPermissions"
+    ]
+   },
+   "req": "GET /config ",
+   "status": 200
+  },
+  {
+   "body": {
+    "email": "",
+    "method": "",
+    "signedIn": false
+   },
+   "req": "GET /account ",
+   "status": 200
+  },
+  {
+   "body": {
+    "appendSystemPrompt": "",
+    "extraArgs": ""
+   },
+   "req": "GET /launch ",
+   "status": 200
+  },
+  {
+   "body": {
+    "path": "<T>/home/.gemini/AGENTS.md",
+    "text": ""
+   },
+   "req": "GET /memory?scope=global ",
+   "status": 200
+  },
+  {
+   "body": {
+    "error": "unknown scope"
+   },
+   "req": "GET /memory?scope=nope ",
+   "status": 400
+  },
+  {
+   "body": {
+    "path": "<T>/f/AGENTS.md",
+    "text": ""
+   },
+   "req": "GET /memory?scope=folder&cwd=<T>/f ",
+   "status": 200
+  },
+  {
+   "body": {
+    "dirs": [
+     "bin",
+     "home"
+    ],
+    "home": "<T>/home",
+    "parent": "/tmp",
+    "path": "<T>"
+   },
+   "req": "GET /dirs?path=<T> ",
+   "status": 200
+  },
+  {
+   "body": {
+    "dirs": [],
+    "error": "[Errno 2] No such file or directory: '/definitely/not/here'",
+    "parent": "/definitely/not",
+    "path": "/definitely/not/here"
+   },
+   "req": "GET /dirs?path=/definitely/not/here ",
+   "status": 200
+  },
+  {
+   "body": {
+    "error": "not found"
+   },
+   "req": "GET /image?id=none&at=0&n=0 ",
+   "status": 404
+  },
+  {
+   "body": {
+    "error": "not found"
+   },
+   "req": "GET /history?id=none ",
+   "status": 404
+  },
+  {
+   "body": {
+    "error": "not found"
+   },
+   "req": "GET /history?id=../../etc ",
+   "status": 404
+  },
+  {
+   "body": {
+    "sessions": []
+   },
+   "req": "GET /sessions ",
+   "status": 200
+  },
+  {
+   "body": {
+    "error": "not found"
+   },
+   "req": "GET /nothing ",
+   "status": 404
+  },
+  {
+   "body": {
+    "error": "invalid literal for int() with base 10: 'abc'"
+   },
+   "req": "GET /events?since=abc ",
+   "status": 400
+  },
+  {
+   "body": {
+    "ok": true,
+    "sessionId": null
+   },
+   "req": "POST /send {\"chat\": \"c0\", \"content\": [{\"text\": \"hello\", \"type\": \"text\"}], \"cwd\": \"<T>/w\", \"mid\": \"z1\"}",
+   "status": 200
+  },
+  {
+   "body": [
+    "state {\"running\": true}",
+    "cc {\"is_error\": true, \"result\": \"还没有登录：到「设置 → 账号」用 Google 登录，或填 Gemini API Key\", \"session_id\": null, \"subtype\": \"error\", \"type\": \"result\"}"
+   ],
+   "req": "events of a message before signing in",
+   "status": 0
+  },
+  {
+   "body": {
+    "url": "https://accounts.google.com/o/oauth2/auth?client_id=x&state=y"
+   },
+   "req": "POST /login {}",
+   "status": 200
+  },
+  {
+   "body": {
+    "error": "Error: invalid authorization code"
+   },
+   "req": "POST /login-code {\"code\": \"bad-code\"}",
+   "status": 400
+  },
+  {
+   "body": {
+    "error": "登录已经结束了，请重新开始"
+   },
+   "req": "POST /login-code {\"code\": \"late\"}",
+   "status": 400
+  },
+  {
+   "body": {
+    "url": "https://accounts.google.com/o/oauth2/auth?client_id=x&state=y"
+   },
+   "req": "POST /login {}",
+   "status": 200
+  },
+  {
+   "body": {
+    "email": "someone@example.com",
+    "ok": true
+   },
+   "req": "POST /login-code {\"code\": \"good-code\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "email": "someone@example.com",
+    "method": "google",
+    "signedIn": true
+   },
+   "req": "GET /account ",
+   "status": 200
+  },
+  {
+   "body": {
+    "account": {
+     "email": "someone@example.com",
+     "method": "google",
+     "signedIn": true
+    },
+    "agyVersion": "9.9.9",
+    "auth": true,
+    "claudeModels": [
+     {
+      "description": "Gemini 4 Argon · Google",
+      "displayName": "Gemini 4 Argon",
+      "efforts": [
+       "low",
+       "medium",
+       "high"
+      ],
+      "provider": "Google",
+      "value": "gemini-4-argon"
+     },
+     {
+      "description": "Gemini 4 Hydrogen · Google",
+      "displayName": "Gemini 4 Hydrogen",
+      "efforts": [
+       "high",
+       "xhigh"
+      ],
+      "provider": "Google",
+      "value": "gemini-4-hydrogen"
+     },
+     {
+      "description": "Claude Opus 5.5 · Anthropic",
+      "displayName": "Claude Opus 5.5",
+      "efforts": [
+       "low",
+       "high"
+      ],
+      "provider": "Anthropic",
+      "value": "claude-opus-5-5"
+     },
+     {
+      "description": "GPT-OSS 120B · OpenAI",
+      "displayName": "GPT-OSS 120B",
+      "efforts": [
+       "medium"
+      ],
+      "provider": "OpenAI",
+      "value": "gpt-oss-120b"
+     }
+    ],
+    "claudeVersion": "9.9.9",
+    "commands": [],
+    "defaultModel": "",
+    "effort": "",
+    "efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh"
+    ],
+    "installed": true,
+    "models": [
+     "gemini-4-argon",
+     "gemini-4-hydrogen",
+     "claude-opus-5-5",
+     "gpt-oss-120b"
+    ],
+    "permissionModes": [
+     "default",
+     "acceptEdits",
+     "plan",
+     "bypassPermissions"
+    ]
+   },
+   "req": "GET /config ",
+   "status": 200
+  },
+  {
+   "body": [
+    "gemini-4-argon-high",
+    "gemini-4-argon-medium",
+    "gemini-4-hydrogen-high",
+    "gpt-oss-120b-medium",
+    "claude-opus-5-5-high",
+    "unknown-model-high",
+    null
+   ],
+   "req": "model ids",
+   "status": 0
+  },
+  {
+   "body": {
+    "appendSystemPrompt": "be brief",
+    "extraArgs": ""
+   },
+   "req": "POST /launch {\"appendSystemPrompt\": \"be brief\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "error": "bad request: No closing quotation"
+   },
+   "req": "POST /launch {\"extraArgs\": \"'unclosed\"}",
+   "status": 400
+  },
+  {
+   "body": {
+    "error": "bad request: 启动参数里不能有 --conversation：怎么和 agy 交流由 App 决定"
+   },
+   "req": "POST /launch {\"extraArgs\": \"--add-dir ~/notes --conversation x\"}",
+   "status": 400
+  },
+  {
+   "body": {
+    "error": "bad request: 启动参数要以选项开头（如 --add-dir ~/notes）；给模型的说明请写在「系统提示」里"
+   },
+   "req": "POST /launch {\"extraArgs\": \"- You run inside the app; use `rish -c '<command>'`\"}",
+   "status": 400
+  },
+  {
+   "body": {
+    "appendSystemPrompt": "be brief",
+    "extraArgs": "--add-dir ~/notes --sandbox"
+   },
+   "req": "POST /launch {\"extraArgs\": \"--add-dir ~/notes --sandbox\"}",
+   "status": 200
+  },
+  {
+   "body": [
+    "--add-dir",
+    "<T>/home/notes",
+    "--sandbox"
+   ],
+   "req": "launch.args()",
+   "status": 0
+  },
+  {
+   "body": {
+    "appendSystemPrompt": "be brief",
+    "extraArgs": ""
+   },
+   "req": "POST /launch {\"extraArgs\": \"\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "path": "<T>/home/.gemini/AGENTS.md"
+   },
+   "req": "POST /memory {\"scope\": \"global\", \"text\": \"remember me\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "path": "<T>/f/AGENTS.md"
+   },
+   "req": "POST /memory {\"cwd\": \"<T>/f\", \"scope\": \"folder\", \"text\": \"folder text\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "error": "bad request: unknown scope"
+   },
+   "req": "POST /memory {\"scope\": \"bogus\", \"text\": \"x\"}",
+   "status": 400
+  },
+  {
+   "body": {
+    "path": "<T>/home/.gemini/AGENTS.md",
+    "text": "remember me"
+   },
+   "req": "GET /memory?scope=global ",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "path": "<T>/new/dir"
+   },
+   "req": "POST /mkdir {\"path\": \"<T>/new/dir\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "error": "[Errno 20] Not a directory: '<T>/bin/agy/x'"
+   },
+   "req": "POST /mkdir {\"path\": \"<T>/bin/agy/x\"}",
+   "status": 400
+  },
+  {
+   "body": {
+    "error": "bad request: 'path'"
+   },
+   "req": "POST /mkdir {}",
+   "status": 400
+  },
+  {
+   "body": {
+    "error": "not found"
+   },
+   "req": "POST /nothing {}",
+   "status": 404
+  },
+  {
+   "body": {
+    "error": "bad request: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+   },
+   "req": "POST /send ",
+   "status": 400
+  },
+  {
+   "body": {
+    "error": "bad request: 'chat'"
+   },
+   "req": "POST /send {}",
+   "status": 400
+  },
+  {
+   "body": {
+    "ok": true,
+    "stopped": false
+   },
+   "req": "POST /stop {\"chat\": \"unknown\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "cancelled": true
+   },
+   "req": "POST /cancel {\"chat\": \"unknown\", \"uuid\": \"x\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "error": "not asked any more"
+   },
+   "req": "POST /permission {\"allow\": true, \"chat\": \"unknown\", \"requestId\": \"r1\"}",
+   "status": 409
+  },
+  {
+   "body": {
+    "context": null
+   },
+   "req": "POST /context {\"chat\": \"unknown\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true
+   },
+   "req": "POST /open {\"cwd\": \"<T>/work2\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "error": "Antigravity 不能回到之前的消息"
+   },
+   "req": "POST /rewind {\"chat\": \"c1\", \"sessionId\": \"x\", \"uuid\": \"y\"}",
+   "status": 409
+  },
+  {
+   "body": {
+    "error": "Antigravity 不能删掉对话里的单条消息"
+   },
+   "req": "POST /delete-message {\"chat\": \"c1\", \"sessionId\": \"x\", \"uuid\": \"y\"}",
+   "status": 409
+  },
+  {
+   "body": {
+    "ok": true,
+    "path": "<T>/up/doc.txt"
+   },
+   "req": "POST /upload name=doc.txt",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "path": "<T>/up/doc (1).txt"
+   },
+   "req": "POST /upload name=doc.txt",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "path": "<T>/up/evil.txt"
+   },
+   "req": "POST /upload name=../evil.txt",
+   "status": 200
+  },
+  {
+   "body": [
+    "doc (1).txt",
+    "doc.txt",
+    "evil.txt"
+   ],
+   "req": "upload files",
+   "status": 0
+  },
+  {
+   "body": {
+    "ok": true,
+    "sessionId": null
+   },
+   "req": "POST /send {\"chat\": \"c1\", \"content\": [{\"source\": {\"data\": \"iVBORw0KGgo=\", \"media_type\": \"image/png\", \"type\": \"base64\"}, \"type\": \"image\"}, {\"text\": \"use a tool\", \"type\": \"text\"}], \"cwd\": \"<T>/w\", \"mid\": \"m1\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "repeated": true
+   },
+   "req": "POST /send {\"chat\": \"c1\", \"content\": \"use a tool\", \"mid\": \"m1\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true
+   },
+   "req": "POST /permission {\"allow\": true, \"chat\": \"c1\", \"requestId\": \"perm-<id>\", \"sessionId\": \"<uuid>\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "error": "not asked any more"
+   },
+   "req": "POST /permission {\"allow\": true, \"chat\": \"c1\", \"requestId\": \"perm-<id>\", \"sessionId\": \"<uuid>\"}",
+   "status": 409
+  },
+  {
+   "body": {
+    "ok": true,
+    "sessionId": "<uuid>"
+   },
+   "req": "POST /send {\"chat\": \"c1\", \"content\": [{\"text\": \"make a plan\", \"type\": \"text\"}], \"cwd\": \"<T>/w\", \"effort\": \"medium\", \"mid\": \"m2\", \"mode\": \"plan\", \"model\": \"claude-opus-5-5\", \"sessionId\": \"<uuid>\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "context": {
+     "categories": [
+      {
+       "deferred": false,
+       "name": "Messages",
+       "tokens": 1000
+      }
+     ],
+     "maxTokens": 1000000,
+     "model": "claude-opus-5-5-high",
+     "percentage": 0.1,
+     "stats": {
+      "assistantMessages": 2,
+      "cost": 0,
+      "tokens": {
+       "cacheRead": 100,
+       "cacheWrite": 0,
+       "input": 200,
+       "output": 20,
+       "thinking": 10
+      },
+      "toolCalls": 3,
+      "userMessages": 2
+     },
+     "totalTokens": 1000
+    }
+   },
+   "req": "POST /context {\"chat\": \"c1\", \"sessionId\": \"<uuid>\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "sessionId": "<uuid>"
+   },
+   "req": "POST /send {\"chat\": \"c1\", \"content\": [{\"text\": \"/name Tools talk\", \"type\": \"text\"}], \"mid\": \"m3\", \"sessionId\": \"<uuid>\"}",
+   "status": 200
+  },
+  {
+   "body": [
+    "state {\"running\": true}",
+    "cc {\"cwd\": \"<T>/w\", \"model\": \"gemini-4-argon-medium\", \"permissionMode\": \"default\", \"session_id\": \"<uuid>\", \"slash_commands\": [\"name\", \"goal\", \"compact\"], \"subtype\": \"init\", \"tools\": [], \"type\": \"system\"}",
+    "stream message_start  {\"id\": \"agy-<sid>-1\"}",
+    "stream content_block_start 0 {\"thinking\": \"\", \"type\": \"thinking\"}",
+    "stream content_block_delta 0 {\"thinking\": \"Look first.\", \"type\": \"thinking_delta\"}",
+    "stream content_block_stop 0 \"\"",
+    "cc {\"message\": {\"content\": [{\"id\": \"call_1\", \"input\": {\"command\": \"ls\", \"description\": \"List files\"}, \"name\": \"Bash\", \"type\": \"tool_use\"}], \"id\": \"agy-<sid>-1\"}, \"session_id\": \"<uuid>\", \"type\": \"assistant\"}",
+    "cc {\"request\": {\"input\": {\"command\": \"ls\", \"description\": \"List files\"}, \"subtype\": \"can_use_tool\", \"tool_name\": \"Bash\", \"tool_use_id\": \"call_1\"}, \"request_id\": \"perm-<id>\", \"session_id\": \"<uuid>\", \"type\": \"control_request\"}",
+    "cc {\"message\": {\"content\": [{\"content\": [{\"text\": \"a.txt\\n\", \"type\": \"text\"}], \"is_error\": false, \"tool_use_id\": \"call_1\", \"type\": \"tool_result\"}], \"role\": \"user\"}, \"session_id\": \"<uuid>\", \"type\": \"user\"}",
+    "cc {\"message\": {\"content\": [{\"id\": \"call_2\", \"input\": {\"file_path\": \"<T>/w/a.txt\", \"new_string\": \"b\", \"old_string\": \"a\"}, \"name\": \"Edit\", \"type\": \"tool_use\"}], \"id\": \"agy-<sid>-1\"}, \"session_id\": \"<uuid>\", \"type\": \"assistant\"}",
+    "cc {\"message\": {\"content\": [{\"id\": \"call_2\", \"input\": {\"file_path\": \"<T>/w/a.txt\", \"new_string\": \"b\\n\", \"old_string\": \"a\\n\"}, \"name\": \"Edit\", \"type\": \"tool_use\"}], \"id\": \"agy-<sid>-1\"}, \"session_id\": \"<uuid>\", \"type\": \"assistant\"}",
+    "cc {\"message\": {\"content\": [{\"content\": [{\"text\": \"\", \"type\": \"text\"}], \"is_error\": false, \"tool_use_id\": \"call_2\", \"type\": \"tool_result\"}], \"role\": \"user\"}, \"session_id\": \"<uuid>\", \"type\": \"user\"}",
+    "stream content_block_start 1 {\"text\": \"\", \"type\": \"text\"}",
+    "stream content_block_delta 1 {\"text\": \"ok: \", \"type\": \"text_delta\"}",
+    "stream content_block_delta 1 {\"text\": \"use a tool (1 picture) [gemini-4-argon-medium]\", \"type\": \"text_delta\"}",
+    "stream content_block_delta 1 {\"text\": \" / be brief\", \"type\": \"text_delta\"}",
+    "stream content_block_stop 1 \"\"",
+    "cc {\"is_error\": false, \"session_id\": \"<uuid>\", \"subtype\": \"success\", \"type\": \"result\"}",
+    "state {\"running\": true}",
+    "cc {\"cwd\": \"<T>/w\", \"model\": \"claude-opus-5-5-high\", \"permissionMode\": \"plan\", \"session_id\": \"<uuid>\", \"slash_commands\": [\"name\", \"goal\", \"compact\"], \"subtype\": \"init\", \"tools\": [], \"type\": \"system\"}",
+    "stream message_start  {\"id\": \"agy-<sid>-2\"}",
+    "cc {\"message\": {\"content\": [{\"id\": \"plan-1\", \"input\": {\"todos\": [{\"activeForm\": \"Read\", \"content\": \"Read\", \"status\": \"completed\"}, {\"activeForm\": \"Write\", \"content\": \"Write\", \"status\": \"in_progress\"}]}, \"name\": \"TodoWrite\", \"type\": \"tool_use\"}], \"id\": \"agy-<sid>-2\"}, \"session_id\": \"<uuid>\", \"type\": \"assistant\"}",
+    "cc {\"message\": {\"content\": [{\"content\": [{\"text\": \"\", \"type\": \"text\"}], \"is_error\": false, \"tool_use_id\": \"plan-1\", \"type\": \"tool_result\"}], \"role\": \"user\"}, \"session_id\": \"<uuid>\", \"type\": \"user\"}",
+    "cc {\"message\": {\"content\": [{\"id\": \"plan-1\", \"input\": {\"todos\": [{\"activeForm\": \"Read\", \"content\": \"Read\", \"status\": \"completed\"}, {\"activeForm\": \"Write\", \"content\": \"Write\", \"status\": \"completed\"}]}, \"name\": \"TodoWrite\", \"type\": \"tool_use\"}], \"id\": \"agy-<sid>-2\"}, \"session_id\": \"<uuid>\", \"type\": \"assistant\"}",
+    "stream content_block_start 0 {\"text\": \"\", \"type\": \"text\"}",
+    "stream content_block_delta 0 {\"text\": \"ok: \", \"type\": \"text_delta\"}",
+    "stream content_block_delta 0 {\"text\": \"make a plan [claude-opus-5-5-high]\", \"type\": \"text_delta\"}",
+    "stream content_block_delta 0 {\"text\": \" / be brief\", \"type\": \"text_delta\"}",
+    "stream content_block_stop 0 \"\"",
+    "cc {\"is_error\": false, \"session_id\": \"<uuid>\", \"subtype\": \"success\", \"type\": \"result\"}",
+    "state {\"running\": true}",
+    "cc {\"cwd\": \"<T>/w\", \"model\": \"claude-opus-5-5-high\", \"permissionMode\": \"default\", \"session_id\": \"<uuid>\", \"slash_commands\": [\"name\", \"goal\", \"compact\"], \"subtype\": \"init\", \"tools\": [], \"type\": \"system\"}",
+    "stream message_start  {\"id\": \"agy-<sid>-3\"}",
+    "title {\"session_id\": \"<uuid>\", \"title\": \"Tools talk\"}",
+    "cc {\"is_error\": false, \"session_id\": \"<uuid>\", \"subtype\": \"success\", \"type\": \"result\"}"
+   ],
+   "req": "events of a conversation",
+   "status": 0
+  },
+  {
+   "body": {
+    "context": 1000,
+    "cwd": "<T>/w",
+    "id": "<uuid>",
+    "messages": [
+     {
+      "images": [
+       "ccimg:<uuid>:0:0"
+      ],
+      "role": "user",
+      "text": "use a tool",
+      "uuid": null
+     },
+     {
+      "blocks": [
+       {
+        "text": "Look first.",
+        "type": "thinking"
+       },
+       {
+        "id": "call_1",
+        "input": {
+         "command": "ls",
+         "description": "List files"
+        },
+        "isError": false,
+        "name": "Bash",
+        "result": "a.txt\n",
+        "type": "tool"
+       },
+       {
+        "id": "call_2",
+        "input": {
+         "file_path": "<T>/w/a.txt",
+         "new_string": "b\n",
+         "old_string": "a\n"
+        },
+        "isError": false,
+        "name": "Edit",
+        "result": "",
+        "type": "tool"
+       },
+       {
+        "text": "ok: use a tool (1 picture) [gemini-4-argon-medium] / be brief",
+        "type": "text"
+       }
+      ],
+      "role": "assistant",
+      "uuid": null
+     },
+     {
+      "images": [],
+      "role": "user",
+      "text": "make a plan",
+      "uuid": null
+     },
+     {
+      "blocks": [
+       {
+        "id": "plan-1",
+        "input": {
+         "todos": [
+          {
+           "activeForm": "Read",
+           "content": "Read",
+           "status": "completed"
+          },
+          {
+           "activeForm": "Write",
+           "content": "Write",
+           "status": "completed"
+          }
+         ]
+        },
+        "name": "TodoWrite",
+        "result": "",
+        "type": "tool"
+       },
+       {
+        "text": "ok: make a plan [claude-opus-5-5-high] / be brief",
+        "type": "text"
+       }
+      ],
+      "role": "assistant",
+      "uuid": null
+     }
+    ],
+    "model": "claude-opus-5-5-high",
+    "title": "Tools talk"
+   },
+   "req": "GET /history?id=<uuid> ",
+   "status": 200
+  },
+  {
+   "body": {
+    "data": "iVBORw0KGgo=",
+    "type": "image/png"
+   },
+   "req": "GET /image?id=<uuid>&at=0&n=0 ",
+   "status": 200
+  },
+  {
+   "body": {
+    "sessions": [
+     {
+      "cwd": "<T>/w",
+      "id": "<uuid>",
+      "mtime": 0,
+      "running": false,
+      "size": 2,
+      "title": "Tools talk"
+     }
+    ]
+   },
+   "req": "GET /sessions ",
+   "status": 200
+  },
+  {
+   "body": {
+    "results": [
+     {
+      "id": "<uuid>",
+      "snippet": "gon-medium] / be brief make a plan ok: make a plan [claude-opus-5-5-high] / be brief"
+     }
+    ]
+   },
+   "req": "GET /search?q=plan ",
+   "status": 200
+  },
+  {
+   "body": {
+    "results": []
+   },
+   "req": "GET /search?q= ",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "sessionId": null
+   },
+   "req": "POST /send {\"chat\": \"c2\", \"content\": [{\"text\": \"slow\", \"type\": \"text\"}], \"cwd\": \"<T>/w\", \"mid\": \"n1\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "sessionId": "<uuid>"
+   },
+   "req": "POST /send {\"chat\": \"c2\", \"content\": [{\"text\": \"inserted one\", \"type\": \"text\"}], \"cwd\": \"<T>/w\", \"mid\": \"n2\", \"uuid\": \"U1\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "cancelled": false
+   },
+   "req": "POST /cancel {\"chat\": \"c2\", \"uuid\": \"U1\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "sessionId": "<uuid>"
+   },
+   "req": "POST /send {\"chat\": \"c2\", \"content\": [{\"text\": \"slow again\", \"type\": \"text\"}], \"mid\": \"n4\", \"sessionId\": \"<uuid>\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "stopped": true
+   },
+   "req": "POST /stop {\"chat\": \"c2\", \"sessionId\": \"<uuid>\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "stopped": false
+   },
+   "req": "POST /stop {\"chat\": \"c2\", \"sessionId\": \"<uuid>\"}",
+   "status": 200
+  },
+  {
+   "body": [
+    "state {\"running\": true}",
+    "cc {\"cwd\": \"<T>/w\", \"model\": \"gemini-4-argon-medium\", \"permissionMode\": \"default\", \"session_id\": \"<uuid>\", \"slash_commands\": [\"name\", \"goal\", \"compact\"], \"subtype\": \"init\", \"tools\": [], \"type\": \"system\"}",
+    "stream message_start  {\"id\": \"agy-<sid>-1\"}",
+    "state {\"running\": true}",
+    "cc {\"command_uuid\": \"U1\", \"session_id\": \"<uuid>\", \"state\": \"started\", \"type\": \"command_lifecycle\"}",
+    "stream content_block_start 0 {\"text\": \"\", \"type\": \"text\"}",
+    "stream content_block_delta 0 {\"text\": \"ok: \", \"type\": \"text_delta\"}",
+    "stream content_block_delta 0 {\"text\": \"slow + inserted one [gemini-4-argon-medium]\", \"type\": \"text_delta\"}",
+    "stream content_block_delta 0 {\"text\": \" / be brief\", \"type\": \"text_delta\"}",
+    "stream content_block_stop 0 \"\"",
+    "cc {\"is_error\": false, \"session_id\": \"<uuid>\", \"subtype\": \"success\", \"type\": \"result\"}",
+    "state {\"running\": true}",
+    "cc {\"cwd\": \"<T>/w\", \"model\": \"gemini-4-argon-medium\", \"permissionMode\": \"default\", \"session_id\": \"<uuid>\", \"slash_commands\": [\"name\", \"goal\", \"compact\"], \"subtype\": \"init\", \"tools\": [], \"type\": \"system\"}",
+    "stream message_start  {\"id\": \"agy-<sid>-2\"}",
+    "cc {\"is_error\": false, \"session_id\": \"<uuid>\", \"subtype\": \"error_during_execution\", \"type\": \"result\"}"
+   ],
+   "req": "events of inserting, stopping",
+   "status": 0
+  },
+  {
+   "body": {
+    "ok": true,
+    "sessionId": null
+   },
+   "req": "POST /send {\"chat\": \"c3\", \"content\": [{\"text\": \"fail\", \"type\": \"text\"}], \"cwd\": \"<T>/w\", \"mid\": \"f1\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "sessionId": "<uuid>"
+   },
+   "req": "POST /send {\"chat\": \"c3\", \"content\": [{\"text\": \"hi\", \"type\": \"text\"}], \"mid\": \"f2\", \"model\": \"nope\", \"sessionId\": \"<uuid>\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "sessionId": "<uuid>"
+   },
+   "req": "POST /send {\"chat\": \"c3\", \"content\": [{\"text\": \"tool please\", \"type\": \"text\"}], \"mid\": \"f3\", \"sessionId\": \"<uuid>\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true
+   },
+   "req": "POST /permission {\"allow\": false, \"chat\": \"c3\", \"requestId\": \"perm-<id>\", \"sessionId\": \"<uuid>\"}",
+   "status": 200
+  },
+  {
+   "body": [
+    "state {\"running\": true}",
+    "cc {\"cwd\": \"<T>/w\", \"model\": \"gemini-4-argon-medium\", \"permissionMode\": \"default\", \"session_id\": \"<uuid>\", \"slash_commands\": [\"name\", \"goal\", \"compact\"], \"subtype\": \"init\", \"tools\": [], \"type\": \"system\"}",
+    "stream message_start  {\"id\": \"agy-<sid>-1\"}",
+    "cc {\"is_error\": true, \"result\": \"FAILED_PRECONDITION (code 400): User location is not supported for the API use.\\n\\n这个模型不对你的账号或网络所在地区开放（Google 的地区限制）。可以换一个模型（比如 Claude），或者换一个网络出口。\", \"session_id\": \"<uuid>\", \"subtype\": \"error\", \"type\": \"result\"}",
+    "state {\"running\": true}",
+    "cc {\"is_error\": true, \"result\": \"agy 不认这个模型（nope）：model nope is not recognized\", \"session_id\": \"<uuid>\", \"subtype\": \"error\", \"type\": \"result\"}",
+    "state {\"running\": true}",
+    "cc {\"cwd\": \"<T>/w\", \"model\": \"gemini-4-argon-medium\", \"permissionMode\": \"default\", \"session_id\": \"<uuid>\", \"slash_commands\": [\"name\", \"goal\", \"compact\"], \"subtype\": \"init\", \"tools\": [], \"type\": \"system\"}",
+    "stream message_start  {\"id\": \"agy-<sid>-2\"}",
+    "stream content_block_start 0 {\"thinking\": \"\", \"type\": \"thinking\"}",
+    "stream content_block_delta 0 {\"thinking\": \"Look first.\", \"type\": \"thinking_delta\"}",
+    "stream content_block_stop 0 \"\"",
+    "cc {\"message\": {\"content\": [{\"id\": \"call_1\", \"input\": {\"command\": \"ls\", \"description\": \"List files\"}, \"name\": \"Bash\", \"type\": \"tool_use\"}], \"id\": \"agy-<sid>-2\"}, \"session_id\": \"<uuid>\", \"type\": \"assistant\"}",
+    "cc {\"request\": {\"input\": {\"command\": \"ls\", \"description\": \"List files\"}, \"subtype\": \"can_use_tool\", \"tool_name\": \"Bash\", \"tool_use_id\": \"call_1\"}, \"request_id\": \"perm-<id>\", \"session_id\": \"<uuid>\", \"type\": \"control_request\"}",
+    "cc {\"message\": {\"content\": [{\"content\": [{\"text\": \"denied by the user\", \"type\": \"text\"}], \"is_error\": true, \"tool_use_id\": \"call_1\", \"type\": \"tool_result\"}], \"role\": \"user\"}, \"session_id\": \"<uuid>\", \"type\": \"user\"}",
+    "stream content_block_start 1 {\"text\": \"\", \"type\": \"text\"}",
+    "stream content_block_delta 1 {\"text\": \"ok: \", \"type\": \"text_delta\"}",
+    "stream content_block_delta 1 {\"text\": \"tool please [gemini-4-argon-medium]\", \"type\": \"text_delta\"}",
+    "stream content_block_delta 1 {\"text\": \" / be brief\", \"type\": \"text_delta\"}",
+    "stream content_block_stop 1 \"\"",
+    "cc {\"is_error\": false, \"session_id\": \"<uuid>\", \"subtype\": \"success\", \"type\": \"result\"}"
+   ],
+   "req": "events of failures",
+   "status": 0
+  },
+  {
+   "body": {
+    "ok": true,
+    "sessionId": null
+   },
+   "req": "POST /send {\"chat\": \"c4\", \"content\": [{\"text\": \"tool, no questions\", \"type\": \"text\"}], \"cwd\": \"<T>/w\", \"mid\": \"b1\", \"mode\": \"bypassPermissions\"}",
+   "status": 200
+  },
+  {
+   "body": [
+    "state {\"running\": true}",
+    "cc {\"cwd\": \"<T>/w\", \"model\": \"gemini-4-argon-medium\", \"permissionMode\": \"bypassPermissions\", \"session_id\": \"<uuid>\", \"slash_commands\": [\"name\", \"goal\", \"compact\"], \"subtype\": \"init\", \"tools\": [], \"type\": \"system\"}",
+    "stream message_start  {\"id\": \"agy-<sid>-1\"}",
+    "stream content_block_start 0 {\"thinking\": \"\", \"type\": \"thinking\"}",
+    "stream content_block_delta 0 {\"thinking\": \"Look first.\", \"type\": \"thinking_delta\"}",
+    "stream content_block_stop 0 \"\"",
+    "cc {\"message\": {\"content\": [{\"id\": \"call_1\", \"input\": {\"command\": \"ls\", \"description\": \"List files\"}, \"name\": \"Bash\", \"type\": \"tool_use\"}], \"id\": \"agy-<sid>-1\"}, \"session_id\": \"<uuid>\", \"type\": \"assistant\"}",
+    "cc {\"message\": {\"content\": [{\"content\": [{\"text\": \"a.txt\\n\", \"type\": \"text\"}], \"is_error\": false, \"tool_use_id\": \"call_1\", \"type\": \"tool_result\"}], \"role\": \"user\"}, \"session_id\": \"<uuid>\", \"type\": \"user\"}",
+    "cc {\"message\": {\"content\": [{\"id\": \"call_2\", \"input\": {\"file_path\": \"<T>/w/a.txt\", \"new_string\": \"b\", \"old_string\": \"a\"}, \"name\": \"Edit\", \"type\": \"tool_use\"}], \"id\": \"agy-<sid>-1\"}, \"session_id\": \"<uuid>\", \"type\": \"assistant\"}",
+    "cc {\"message\": {\"content\": [{\"id\": \"call_2\", \"input\": {\"file_path\": \"<T>/w/a.txt\", \"new_string\": \"b\\n\", \"old_string\": \"a\\n\"}, \"name\": \"Edit\", \"type\": \"tool_use\"}], \"id\": \"agy-<sid>-1\"}, \"session_id\": \"<uuid>\", \"type\": \"assistant\"}",
+    "cc {\"message\": {\"content\": [{\"content\": [{\"text\": \"\", \"type\": \"text\"}], \"is_error\": false, \"tool_use_id\": \"call_2\", \"type\": \"tool_result\"}], \"role\": \"user\"}, \"session_id\": \"<uuid>\", \"type\": \"user\"}",
+    "stream content_block_start 1 {\"text\": \"\", \"type\": \"text\"}",
+    "stream content_block_delta 1 {\"text\": \"ok: \", \"type\": \"text_delta\"}",
+    "stream content_block_delta 1 {\"text\": \"tool, no questions [gemini-4-argon-medium]\", \"type\": \"text_delta\"}",
+    "stream content_block_delta 1 {\"text\": \" / be brief\", \"type\": \"text_delta\"}",
+    "stream content_block_stop 1 \"\"",
+    "cc {\"is_error\": false, \"session_id\": \"<uuid>\", \"subtype\": \"success\", \"type\": \"result\"}"
+   ],
+   "req": "events of everything allowed",
+   "status": 0
+  },
+  {
+   "body": {
+    "context": 0,
+    "cwd": "<T>/w",
+    "id": "<uuid>",
+    "messages": [
+     {
+      "images": [
+       "ccimg:<uuid>:0:0"
+      ],
+      "role": "user",
+      "text": "use a tool",
+      "uuid": null
+     },
+     {
+      "blocks": [
+       {
+        "text": "Look first.",
+        "type": "thinking"
+       },
+       {
+        "id": "call_1",
+        "input": {
+         "command": "ls",
+         "description": "List files"
+        },
+        "isError": false,
+        "name": "Bash",
+        "result": "a.txt\n",
+        "type": "tool"
+       },
+       {
+        "id": "call_2",
+        "input": {
+         "file_path": "<T>/w/a.txt",
+         "new_string": "b\n",
+         "old_string": "a\n"
+        },
+        "isError": false,
+        "name": "Edit",
+        "result": "",
+        "type": "tool"
+       },
+       {
+        "text": "ok: use a tool (1 picture) [gemini-4-argon-medium] / be brief",
+        "type": "text"
+       }
+      ],
+      "role": "assistant",
+      "uuid": null
+     },
+     {
+      "images": [],
+      "role": "user",
+      "text": "make a plan",
+      "uuid": null
+     },
+     {
+      "blocks": [
+       {
+        "id": "plan-1",
+        "input": {
+         "todos": [
+          {
+           "activeForm": "Read",
+           "content": "Read",
+           "status": "completed"
+          },
+          {
+           "activeForm": "Write",
+           "content": "Write",
+           "status": "completed"
+          }
+         ]
+        },
+        "name": "TodoWrite",
+        "result": "",
+        "type": "tool"
+       },
+       {
+        "text": "ok: make a plan [claude-opus-5-5-high] / be brief",
+        "type": "text"
+       }
+      ],
+      "role": "assistant",
+      "uuid": null
+     }
+    ],
+    "model": null,
+    "title": "Tools talk"
+   },
+   "req": "GET /history?id=<uuid> ",
+   "status": 200
+  },
+  {
+   "body": {
+    "context": 1000,
+    "cwd": "<T>/w",
+    "id": "<uuid>",
+    "messages": [
+     {
+      "images": [
+       "ccimg:<uuid>:0:0"
+      ],
+      "role": "user",
+      "text": "use a tool",
+      "uuid": null
+     },
+     {
+      "blocks": [
+       {
+        "text": "Look first.",
+        "type": "thinking"
+       },
+       {
+        "id": "call_1",
+        "input": {
+         "command": "ls",
+         "description": "List files"
+        },
+        "isError": false,
+        "name": "Bash",
+        "result": "a.txt\n",
+        "type": "tool"
+       },
+       {
+        "id": "call_2",
+        "input": {
+         "file_path": "<T>/w/a.txt",
+         "new_string": "b\n",
+         "old_string": "a\n"
+        },
+        "isError": false,
+        "name": "Edit",
+        "result": "",
+        "type": "tool"
+       },
+       {
+        "text": "ok: use a tool (1 picture) [gemini-4-argon-medium] / be brief",
+        "type": "text"
+       }
+      ],
+      "role": "assistant",
+      "uuid": null
+     },
+     {
+      "images": [],
+      "role": "user",
+      "text": "make a plan",
+      "uuid": null
+     },
+     {
+      "blocks": [
+       {
+        "id": "plan-1",
+        "input": {
+         "todos": [
+          {
+           "activeForm": "Read",
+           "content": "Read",
+           "status": "completed"
+          },
+          {
+           "activeForm": "Write",
+           "content": "Write",
+           "status": "completed"
+          }
+         ]
+        },
+        "name": "TodoWrite",
+        "result": "",
+        "type": "tool"
+       },
+       {
+        "text": "ok: make a plan [claude-opus-5-5-high] / be brief",
+        "type": "text"
+       }
+      ],
+      "role": "assistant",
+      "uuid": null
+     }
+    ],
+    "model": "gemini-4-argon-medium",
+    "title": "Tools talk"
+   },
+   "req": "GET /history?id=<uuid> ",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true,
+    "sessionId": "<uuid>"
+   },
+   "req": "POST /send {\"chat\": \"c1b\", \"content\": [{\"text\": \"again\", \"type\": \"text\"}], \"mid\": \"m9\", \"sessionId\": \"<uuid>\"}",
+   "status": 200
+  },
+  {
+   "body": [
+    "state {\"running\": true}",
+    "cc {\"cwd\": \"<T>/w\", \"model\": \"gemini-4-argon-medium\", \"permissionMode\": \"default\", \"session_id\": \"<uuid>\", \"slash_commands\": [\"name\", \"goal\", \"compact\"], \"subtype\": \"init\", \"tools\": [], \"type\": \"system\"}",
+    "stream message_start  {\"id\": \"agy-<sid>-4\"}",
+    "stream content_block_start 0 {\"text\": \"\", \"type\": \"text\"}",
+    "stream content_block_delta 0 {\"text\": \"ok: \", \"type\": \"text_delta\"}",
+    "stream content_block_delta 0 {\"text\": \"again [gemini-4-argon-medium]\", \"type\": \"text_delta\"}",
+    "stream content_block_stop 0 \"\"",
+    "cc {\"is_error\": false, \"session_id\": \"<uuid>\", \"subtype\": \"success\", \"type\": \"result\"}"
+   ],
+   "req": "events of a conversation opened again",
+   "status": 0
+  },
+  {
+   "body": {
+    "ok": true
+   },
+   "req": "POST /title {\"id\": \"<uuid>\", \"title\": \"  A   new   name \"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "error": "bad request"
+   },
+   "req": "POST /title {\"id\": \"<uuid>\", \"title\": \"   \"}",
+   "status": 400
+  },
+  {
+   "body": {
+    "error": "bad request"
+   },
+   "req": "POST /title {\"id\": \"../x\", \"title\": \"x\"}",
+   "status": 400
+  },
+  {
+   "body": {
+    "sessions": [
+     {
+      "cwd": "<T>/w",
+      "id": "<uuid>",
+      "mtime": 0,
+      "running": false,
+      "size": 1,
+      "title": "tool, no questions"
+     },
+     {
+      "cwd": "<T>/w",
+      "id": "<uuid>",
+      "mtime": 0,
+      "running": false,
+      "size": 2,
+      "title": "fail"
+     },
+     {
+      "cwd": "<T>/w",
+      "id": "<uuid>",
+      "mtime": 0,
+      "running": false,
+      "size": 2,
+      "title": "A new name"
+     },
+     {
+      "cwd": "<T>/w",
+      "id": "<uuid>",
+      "mtime": 0,
+      "running": false,
+      "size": 3,
+      "title": "Tools talk"
+     }
+    ]
+   },
+   "req": "GET /sessions ",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": true
+   },
+   "req": "POST /delete {\"id\": \"<uuid>\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": false
+   },
+   "req": "POST /delete {\"id\": \"nonexistent\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "ok": false
+   },
+   "req": "POST /delete {}",
+   "status": 200
+  },
+  {
+   "body": {
+    "sessions": [
+     {
+      "cwd": "<T>/w",
+      "id": "<uuid>",
+      "mtime": 0,
+      "running": false,
+      "size": 1,
+      "title": "tool, no questions"
+     },
+     {
+      "cwd": "<T>/w",
+      "id": "<uuid>",
+      "mtime": 0,
+      "running": false,
+      "size": 2,
+      "title": "fail"
+     },
+     {
+      "cwd": "<T>/w",
+      "id": "<uuid>",
+      "mtime": 0,
+      "running": false,
+      "size": 3,
+      "title": "Tools talk"
+     }
+    ]
+   },
+   "req": "GET /sessions ",
+   "status": 200
+  },
+  {
+   "body": [],
+   "req": "files of the deleted conversation",
+   "status": 0
+  },
+  {
+   "body": {
+    "account": {
+     "email": "",
+     "method": "apiKey",
+     "signedIn": true
+    },
+    "ok": true
+   },
+   "req": "POST /auth {\"key\": \"AIza-1\", \"provider\": \"gemini\"}",
+   "status": 200
+  },
+  {
+   "body": [
+    "0o600",
+    {
+     "modelProvider": "gemini"
+    }
+   ],
+   "req": "key file",
+   "status": 0
+  },
+  {
+   "body": {
+    "error": "only a Gemini API key is kept here"
+   },
+   "req": "POST /auth {\"key\": \"x\", \"provider\": \"openai\"}",
+   "status": 400
+  },
+  {
+   "body": {
+    "account": {
+     "email": "someone@example.com",
+     "method": "google",
+     "signedIn": true
+    },
+    "ok": true
+   },
+   "req": "POST /auth {\"key\": \"\", \"provider\": \"gemini\"}",
+   "status": 200
+  },
+  {
+   "body": {},
+   "req": "settings after the key",
+   "status": 0
+  },
+  {
+   "body": {
+    "account": {
+     "email": "",
+     "method": "",
+     "signedIn": false
+    },
+    "ok": true
+   },
+   "req": "POST /logout {}",
+   "status": 200
+  },
+  {
+   "body": {
+    "email": "",
+    "method": "",
+    "signedIn": false
+   },
+   "req": "GET /account ",
+   "status": 200
+  }
+ ]
+}
