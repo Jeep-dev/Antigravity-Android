@@ -107,6 +107,17 @@ public class ScreensTest {
         set(a.agent, "home", "/data/data/com.termux/files/home");
         set(a.agent, "defaultCwd", "/data/data/com.termux/files/home/work");
         set(a.agent, "defaultModel", "gemini-4-argon");
+        Method cfg = Agent.class.getDeclaredMethod("applyConfig", JSONObject.class);
+        cfg.setAccessible(true);
+        cfg.invoke(a.agent, new JSONObject("{\"models\":[\"gemini-4-argon\",\"gemini-4-hydrogen\",\"claude-opus-5-5\",\"claude-sonnet-5-5\",\"gpt-oss-120b\"],"
+                + "\"defaultModel\":\"gemini-4-argon\",\"efforts\":[\"low\",\"medium\",\"high\",\"xhigh\"],\"effort\":\"medium\","
+                + "\"permissionModes\":[\"default\",\"acceptEdits\",\"auto\",\"plan\",\"bypassPermissions\"],"
+                + "\"account\":{\"signedIn\":true,\"method\":\"google\",\"email\":\"someone@gmail.com\"},"
+                + "\"claudeModels\":[{\"value\":\"gemini-4-argon\",\"displayName\":\"Gemini 4 Argon\",\"description\":\"Gemini 4 Argon · Google\",\"provider\":\"Google\",\"efforts\":[\"low\",\"medium\",\"high\"]},"
+                + "{\"value\":\"gemini-4-hydrogen\",\"displayName\":\"Gemini 4 Hydrogen\",\"description\":\"Gemini 4 Hydrogen · Google\",\"provider\":\"Google\",\"efforts\":[\"low\",\"medium\",\"high\",\"xhigh\"]},"
+                + "{\"value\":\"claude-opus-5-5\",\"displayName\":\"Claude Opus 5.5\",\"description\":\"Claude Opus 5.5 · Anthropic\",\"provider\":\"Anthropic\",\"efforts\":[\"low\",\"medium\",\"high\"]},"
+                + "{\"value\":\"claude-sonnet-5-5\",\"displayName\":\"Claude Sonnet 5.5\",\"description\":\"Claude Sonnet 5.5 · Anthropic\",\"provider\":\"Anthropic\",\"efforts\":[\"low\",\"medium\",\"high\"]},"
+                + "{\"value\":\"gpt-oss-120b\",\"displayName\":\"GPT-OSS 120B\",\"description\":\"GPT-OSS 120B · OpenAI\",\"provider\":\"OpenAI\",\"efforts\":[\"medium\"]}]}"));
         Chat chat = (Chat) get(a, "current");
         chat.cwd = "/data/data/com.termux/files/home/work";
         call(a, "renderNow");
@@ -282,17 +293,6 @@ public class ScreensTest {
         idle();
         d.dismiss();
 
-        Method cfg = Agent.class.getDeclaredMethod("applyConfig", JSONObject.class);
-        cfg.setAccessible(true);
-        cfg.invoke(a.agent, new JSONObject("{\"models\":[\"gemini-4-argon\",\"gemini-4-hydrogen\",\"claude-opus-5-5\",\"claude-sonnet-5-5\",\"gpt-oss-120b\"],"
-                + "\"defaultModel\":\"gemini-4-argon\",\"efforts\":[\"low\",\"medium\",\"high\",\"xhigh\"],\"effort\":\"medium\","
-                + "\"permissionModes\":[\"default\",\"acceptEdits\",\"auto\",\"plan\",\"bypassPermissions\"],"
-                + "\"account\":{\"signedIn\":true,\"method\":\"google\",\"email\":\"someone@gmail.com\"},"
-                + "\"claudeModels\":[{\"value\":\"gemini-4-argon\",\"displayName\":\"Gemini 4 Argon\",\"description\":\"Gemini 4 Argon · Google\",\"provider\":\"Google\",\"efforts\":[\"low\",\"medium\",\"high\"]},"
-                + "{\"value\":\"gemini-4-hydrogen\",\"displayName\":\"Gemini 4 Hydrogen\",\"description\":\"Gemini 4 Hydrogen · Google\",\"provider\":\"Google\",\"efforts\":[\"low\",\"medium\",\"high\",\"xhigh\"]},"
-                + "{\"value\":\"claude-opus-5-5\",\"displayName\":\"Claude Opus 5.5\",\"description\":\"Claude Opus 5.5 · Anthropic\",\"provider\":\"Anthropic\",\"efforts\":[\"low\",\"medium\",\"high\"]},"
-                + "{\"value\":\"claude-sonnet-5-5\",\"displayName\":\"Claude Sonnet 5.5\",\"description\":\"Claude Sonnet 5.5 · Anthropic\",\"provider\":\"Anthropic\",\"efforts\":[\"low\",\"medium\",\"high\"]},"
-                + "{\"value\":\"gpt-oss-120b\",\"displayName\":\"GPT-OSS 120B\",\"description\":\"GPT-OSS 120B · OpenAI\",\"provider\":\"OpenAI\",\"efforts\":[\"medium\"]}]}"));
         call(a.pickers, "modelSheet");
         idle();
         shot(ShadowDialog.getLatestDialog().getWindow().getDecorView(), "11-model");

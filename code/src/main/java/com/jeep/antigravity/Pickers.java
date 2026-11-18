@@ -60,11 +60,11 @@ final class Pickers extends Part {
 
     /** The permission modes: id, name, what it does. */
     private static final String[][] MODES = {
-            {"default", "每次询问", "改文件、运行命令前都先问你"},
-            {"acceptEdits", "自动改文件", "改工作目录里的文件不再问，运行命令前还会问"},
-            {"auto", "自动", "改文件和安全、可撤销的命令直接做，不可逆的操作才问"},
-            {"plan", "规划", "先研究、写出计划给你看，再动手"},
-            {"bypassPermissions", "全部允许", "什么都不问，直接做：只在你信得过的目录里用"},
+            {"default", "每次询问", "都先问"},
+            {"acceptEdits", "自动改文件", "命令还会问"},
+            {"auto", "自动", "只问不可逆的"},
+            {"plan", "规划", "先写计划"},
+            {"bypassPermissions", "全部允许", "什么都不问"},
     };
 
     String modeName(String mode) {
@@ -74,7 +74,9 @@ final class Pickers extends Part {
 
     /** 权限: how much agy does without asking, for the next messages. */
     void modeSheet(Runnable after) {
-        Dialog sheet = sheets.sheet("权限", "agy 运行命令、改文件之前要不要先问你；从下一条消息起生效");
+        Dialog sheet = sheets.sheet("权限", "agy 运行命令、改文件之前要不要先问你，从下一条消息起生效。"
+                + "自动改文件：改工作目录里的文件不问；自动：安全、可撤销的直接做；规划：先研究、写出计划再动手；"
+                + "全部允许：只在信得过的目录里用。");
         LinearLayout card = sheets.card(sheet);
         List<String> offered = new ArrayList<>(agent.permissionModes);
         if (offered.isEmpty()) offered.add("default");
