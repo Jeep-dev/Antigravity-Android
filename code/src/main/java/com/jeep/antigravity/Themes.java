@@ -206,7 +206,7 @@ final class Themes {
     }
 
     static void setMode(Context c, int m) {
-        prefs(c).edit().putInt("mode", m).apply();
+        prefs(c).edit().putInt("darkMode", m).apply();
         load(c);
     }
 
@@ -218,6 +218,10 @@ final class Themes {
     /** A theme of before (one list of the light, the dark and those following the system) as the
      *  palette and mode it became, the like ones as the one kept. */
     private static void migrate(SharedPreferences p) {
+        // The dark mode was kept as "mode", the key the permission mode (a string) is kept in too:
+        // one written over the other, the app crashed when it opened. An int there is the dark mode.
+        Object old = p.getAll().get("mode");
+        if (old instanceof Integer) p.edit().putInt("darkMode", (Integer) old).remove("mode").apply();
         if (p.contains("palette") || !p.contains("theme")) return;
         String palette = "claude";
         int m = 0;
@@ -232,7 +236,7 @@ final class Themes {
             case "slate": palette = "black"; m = 2; break;
             default: break;
         }
-        p.edit().putString("palette", palette).putInt("mode", m).putBoolean("pureBlack", pure).remove("theme").apply();
+        p.edit().putString("palette", palette).putInt("darkMode", m).putBoolean("pureBlack", pure).remove("theme").apply();
     }
 
     private static synchronized void load(Context c) {
@@ -241,7 +245,7 @@ final class Themes {
         String id = p.getString("palette", "claude");
         Theme t = ALL[ALL.length - 1];
         for (Theme x : ALL) if (x.id.equals(id)) t = x;
-        mode = p.getInt("mode", 0);
+        mode = p.getInt("darkMode", 0);
         black = p.getBoolean("pureBlack", false);
         fill(overLight, t.light);
         fill(overDark, t.dark);

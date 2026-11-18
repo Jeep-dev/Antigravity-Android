@@ -38,7 +38,9 @@ final class Agent extends Part {
         cwd = prefs.getString("cwd", "");
         model = prefs.getString("model", "");
         effort = prefs.getString("effort", "");
-        mode = prefs.getString("mode", "");
+        // An int under "mode" is the dark mode of before (Themes moves it to its own key).
+        Object m = prefs.getAll().get("mode");
+        mode = m instanceof String ? (String) m : "";
         try {
             fill(efforts, new JSONArray(prefs.getString("efforts", "[]")));
             fill(permissionModes, new JSONArray(prefs.getString("permissionModes", "[]")));

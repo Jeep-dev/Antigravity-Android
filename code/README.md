@@ -1,4 +1,4 @@
-# Antigravity for Android (v0.1.1)
+# Antigravity for Android (v0.1.2)
 
 Google's Antigravity CLI (`agy`) on the phone in one app, no Termux needed: its own application id
 (`com.jeep.antigravity`), name and icon. No WebView: the interface is plain Android views (Java), so
