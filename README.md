@@ -4,6 +4,15 @@
 
 App 自带一个小型 Linux 环境（Alpine + Python + proot），`agy` 就跑在里面；界面是原生 Android 控件，不是 WebView，滚动和选字都是系统自己的。界面和交互沿用 [ClaudeCode-Android](https://github.com/Jeep-dev/ClaudeCode-Android) 和 [PiAgent-Android](https://github.com/Jeep-dev/PiAgent-Android)。
 
+<p>
+  <img src="docs/screenshots/hero.png" width="24%" alt="新对话">
+  <img src="docs/screenshots/chat.png" width="24%" alt="对话">
+  <img src="docs/screenshots/account.png" width="24%" alt="设置 → 账号">
+  <img src="docs/screenshots/permissions.png" width="24%" alt="权限模式">
+</p>
+
+<sub>从左到右：新对话、对话、设置 → 账号、权限模式。截图由 <code>ScreensTest</code> 生成，内容是演示用的。</sub>
+
 > 这是个人项目，不是 Google 的产品，和 Google 没有关系。`agy` 本身不在这个仓库里：第一次打开 App 时，从 Google 的官方地址下载 Linux 版，并按 Google 公布的 SHA-512 校验。使用 `agy` 需要遵守 Google 的条款。
 
 ## 功能
