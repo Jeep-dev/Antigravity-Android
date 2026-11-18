@@ -380,6 +380,7 @@ class Agy:
         self.failures = 0
         self.retry_at = 0.0
         self.restart_reason = None  # started again once no reply runs
+        self.early = {}  # session id -> updates that came before a conversation took the session (session/new's)
         self.args_used = None
         self.last_error = ''
 
@@ -483,9 +484,15 @@ class Agy:
         elif 'method' in msg:
             if msg['method'] == 'session/update':
                 params = msg.get('params') or {}
-                chat = chat_of_session(params.get('sessionId'))
+                sid = params.get('sessionId')
+                chat = chat_of_session(sid)
                 if chat is not None:
                     chat.update(params.get('update') or {})
+                elif sid:  # agy tells a new session's commands as it answers: kept until it is taken
+                    with self.lock:
+                        self.early.setdefault(sid, []).append(params.get('update') or {})
+                        for old in list(self.early)[:-8]:
+                            del self.early[old]
         elif 'id' in msg:
             slot = self.pending.pop(msg['id'], None)
             if slot is None:
@@ -1081,6 +1088,10 @@ class Chat:
                     self.loaded = gen
                     self.transcript = Transcript()
                     self.took(result)
+                with agy.lock:
+                    early = agy.early.pop(self.session_id, [])
+                for u in early:
+                    self.update(u)
                 with chats_lock:
                     loose.pop(self.session_id, None)
                 log('chat %s: new session %s in %s' % (self.key[:8], self.session_id, self.cwd))
