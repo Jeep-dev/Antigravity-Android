@@ -21,10 +21,13 @@ import org.json.JSONObject;
 
 /**
  * 用量 (the top bar's menu): how full this conversation's context window is, and what it has used so
- * far (tokens, cost), as agy counts them (the bridge's /context: agy's session stats).
+ * far (tokens, cost), as agy counts them (the bridge's /context: agy's session stats); and the account's
+ * model quota, the five hours and the week of each group of models, as agy's /usage tells it (the
+ * bridge's /usage), with the AI credits left.
  *
  * The context is one segmented bar of the window, a part per kind, each kind always in its own
- * colour, with a legend naming them.
+ * colour, with a legend naming them; a limit is a meter of what is used, whose fill turns to warning,
+ * then danger, as it runs out, said in words too.
  */
 final class UsageSheet extends Part {
     /** The categorical palette (validated, light and dark), slots in a fixed order. */
@@ -50,7 +53,12 @@ final class UsageSheet extends Part {
         LinearLayout stats = card(box);
         stats.addView(waitingLine("正在读取…"));
 
+        label(box, "订阅额度");
+        LinearLayout plan = card(box);
+        plan.addView(waitingLine("正在读取…"));
+
         sheet.show();
+        loadPlan(plan);
 
         Chat chat = app.current;
         bridge.post("/context", obj("chat", chat.key, "sessionId", chat.sessionId), (status, data) -> {
@@ -64,6 +72,18 @@ final class UsageSheet extends Part {
             }
             fillContext(context, c);
             if (c.optJSONObject("stats") != null) fillStats(stats, c.optJSONObject("stats"));
+        });
+    }
+
+    private void loadPlan(LinearLayout plan) {
+        bridge.get("/usage", (status, data) -> {
+            plan.removeAllViews();
+            if (status != 200 || data == null) { plan.addView(waitingLine("读取失败：还没连上 agy")); return; }
+            String error = data.optString("error");
+            if (error.equals("login")) plan.addView(waitingLine("agy 还没登录：在 设置 → 账号 用 Google 登录后就能看到"));
+            else if (error.equals("apiKey")) plan.addView(waitingLine("用 Gemini API Key 时没有这些额度"));
+            else if (!error.isEmpty()) plan.addView(waitingLine("读取失败（" + error + "）"));
+            else fillPlan(plan, data.optJSONArray("groups"), data.isNull("credits") ? -1 : data.optDouble("credits", -1));
         });
     }
 
@@ -175,6 +195,95 @@ final class UsageSheet extends Part {
         row.addView(Ui.text(app, name, 14, R.color.text), Ui.weight());
         row.addView(Ui.text(app, value, 14, R.color.text2));
         card.addView(row, Ui.fill());
+    }
+
+    // ---- 订阅额度 ----
+
+    /** Each group of models sharing a quota: its name and models, then a meter per limit, of what is used. */
+    private void fillPlan(LinearLayout card, JSONArray groups, double credits) {
+        boolean any = false;
+        for (int i = 0; groups != null && i < groups.length(); i++) {
+            JSONObject g = groups.optJSONObject(i);
+            JSONArray limits = g == null ? null : g.optJSONArray("limits");
+            if (limits == null || limits.length() == 0) continue;
+            if (any) card.addView(new View(app), new LinearLayout.LayoutParams(1, dp(16)));
+            any = true;
+            TextView name = Ui.text(app, groupName(g.optString("name")), 15, R.color.text);
+            name.setTypeface(Ui.MEDIUM);
+            card.addView(name, Ui.fill());
+            if (!g.optString("models").isEmpty()) {
+                TextView models = Ui.text(app, g.optString("models"), 12.5f, R.color.text3);
+                models.setPadding(0, dp(2), 0, 0);
+                card.addView(models, Ui.fill());
+            }
+            for (int k = 0; k < limits.length(); k++) {
+                JSONObject l = limits.optJSONObject(k);
+                if (l != null) limit(card, l);
+            }
+        }
+        if (!any) card.addView(waitingLine("agy 没有说这个账号的额度"));
+        if (credits >= 0) {
+            if (any) card.addView(new View(app), new LinearLayout.LayoutParams(1, dp(10)));
+            statRow(card, "AI 积分（额度用完后使用）", String.format(Locale.ROOT, credits == Math.rint(credits) ? "%.0f" : "%.2f", credits));
+        }
+    }
+
+    private void limit(LinearLayout card, JSONObject l) {
+        double left = l.isNull("remaining") ? 1 : l.optDouble("remaining", 1);
+        int used = (int) Math.max(0, Math.min(100, Math.round(100 * (1 - left))));
+        // The fill carries how near it is to running out; words say it too.
+        int fill, state = 0;
+        if (used >= 100) { fill = R.color.danger; state = 2; }
+        else if (used >= 80) { fill = R.color.warn; state = 1; }
+        else fill = R.color.accent;
+
+        LinearLayout head = Ui.row(app);
+        head.setPadding(0, dp(10), 0, 0);
+        String window = l.optString("window");
+        TextView name = Ui.text(app, "5h".equals(window) ? "5 小时额度" : "weekly".equals(window) ? "每周额度" : l.optString("name"), 14, R.color.text);
+        head.addView(name, Ui.weight());
+        if (state > 0) {
+            TextView s = Ui.text(app, state == 2 ? "已用完" : "快用完了", 12.5f, fill);
+            s.setPadding(0, 0, dp(8), 0);
+            head.addView(s);
+        }
+        head.addView(Ui.text(app, "已用 " + used + "%", 14, R.color.text2));
+        card.addView(head, Ui.fill());
+
+        int fillColor = Ui.color(app, fill);
+        Segments meter = new Segments(app, 100, Glass.alpha(fillColor, 0.18f));
+        meter.add(used, fillColor);
+        meter.setContentDescription(name.getText() + " 已用 " + used + "%");
+        card.addView(meter, new LinearLayout.LayoutParams(-1, dp(8)));
+        Ui.margins(meter, app, 0, 7, 0, 5);
+        String resets = resets(l.optString("resetsAt"));
+        if (!resets.isEmpty()) card.addView(Ui.text(app, resets, 12.5f, R.color.text3));
+    }
+
+    private static String groupName(String name) {
+        switch (name) {
+            case "Gemini Models": return "Gemini 模型";
+            case "Claude and GPT models": return "Claude 和 GPT 模型";
+            default: return name;
+        }
+    }
+
+    /** When a limit is full again: in minutes or hours when near, else the day and time, in the phone's zone. */
+    private static String resets(String iso) {
+        if (iso == null || iso.isEmpty() || iso.equals("null")) return "";
+        try {
+            java.time.OffsetDateTime at = java.time.OffsetDateTime.parse(iso);
+            long mins = java.time.Duration.between(java.time.OffsetDateTime.now(), at).toMinutes();
+            if (mins <= 0) return "即将重置";
+            if (mins < 60) return mins + " 分钟后重置";
+            if (mins < 24 * 60) return (mins / 60) + " 小时 " + (mins % 60) + " 分钟后重置";
+            java.time.ZonedDateTime local = at.atZoneSameInstant(java.time.ZoneId.systemDefault());
+            String[] week = {"周一", "周二", "周三", "周四", "周五", "周六", "周日"};
+            return String.format(Locale.ROOT, "%d月%d日 %s %02d:%02d 重置", local.getMonthValue(), local.getDayOfMonth(),
+                    week[local.getDayOfWeek().getValue() - 1], local.getHour(), local.getMinute());
+        } catch (RuntimeException e) {
+            return "";
+        }
     }
 
     // ---- 共用 ----

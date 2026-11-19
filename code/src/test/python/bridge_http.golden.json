@@ -6,7 +6,7 @@
     "defaultCwd": "<T>/home/work",
     "home": "<T>/home",
     "ok": true,
-    "version": 2
+    "version": 3
    },
    "req": "GET /health ",
    "status": 200
@@ -161,6 +161,13 @@
   },
   {
    "body": {
+    "error": "login"
+   },
+   "req": "GET /usage ",
+   "status": 200
+  },
+  {
+   "body": {
     "url": "https://accounts.google.com/o/oauth2/auth?client_id=x&state=y"
    },
    "req": "POST /login {}",
@@ -202,6 +209,48 @@
     "signedIn": true
    },
    "req": "GET /account ",
+   "status": 200
+  },
+  {
+   "body": {
+    "credits": 0,
+    "groups": [
+     {
+      "limits": [
+       {
+        "id": "gemini-weekly",
+        "name": "Weekly Limit Remaining",
+        "remaining": 0.9675,
+        "resetsAt": "2026-11-25T06:50:07Z",
+        "window": "weekly"
+       },
+       {
+        "id": "gemini-5h",
+        "name": "Five Hour Limit Remaining",
+        "remaining": 0.15,
+        "resetsAt": "2026-11-19T04:48:23Z",
+        "window": "5h"
+       }
+      ],
+      "models": "Gemini 4 Neon, Gemini 3.8 Flash",
+      "name": "Gemini Models"
+     },
+     {
+      "limits": [
+       {
+        "id": "gemini-argon-wtu-weekly",
+        "name": "Gemini 4 Argon Weekly Limit",
+        "remaining": 1,
+        "resetsAt": "2026-11-25T06:49:19Z",
+        "window": "weekly"
+       }
+      ],
+      "models": "",
+      "name": "Gemini 4 Argon"
+     }
+    ]
+   },
+   "req": "GET /usage ",
    "status": 200
   },
   {

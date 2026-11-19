@@ -30,7 +30,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 2  # Bridge VERSION in the app: an app update replaces an older running bridge
+VERSION = 3  # Bridge VERSION in the app: an app update replaces an older running bridge
 HOME = os.path.expanduser('~')
 GEMINI_DIR = os.path.join(HOME, '.gemini')
 AGY_DIR = os.environ.get('AGY_DATA_DIR') or os.path.join(GEMINI_DIR, 'antigravity-cli')
@@ -1754,6 +1754,67 @@ def account():
     return {'signedIn': False, 'method': '', 'email': ''}
 
 
+def agy_command(name):
+    """A read-only slash command of agy's (/usage, /credits) as print mode answers it, with no turn, no
+    quota spent and no conversation left behind: its structured data, or AgyError in words for the user."""
+    try:
+        done = subprocess.run([agy_path(), '-p', '/' + name, '--output-format', 'json'], capture_output=True, text=True,
+                              timeout=25, env=agy_env(), cwd=DEFAULT_CWD if os.path.isdir(DEFAULT_CWD) else HOME, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise AgyError('agy 没有及时回答')
+    except OSError as e:
+        raise AgyError('agy 没能运行：%s' % e)
+    try:
+        out = json.loads(done.stdout)
+    except ValueError:
+        out = None
+    if not isinstance(out, dict) or out.get('status') != 'SUCCESS':
+        said = (out.get('response') if isinstance(out, dict) else '') or done.stderr or done.stdout
+        lines = [x.strip() for x in str(said).splitlines() if x.strip()]
+        raise AgyError(lines[-1][:300] if lines else 'agy 退出了（%s）' % done.returncode)
+    data = (out.get('command') or {}).get('data')
+    return data if isinstance(data, dict) else {}
+
+
+def plan_usage():
+    """The account's model quota as agy's /usage tells it: per group of models sharing it, each limit
+    (the five hours, the week) with the share left and when it is full again; and the AI credits left
+    (used when the quota is). {'error': 'login' / 'apiKey' / words} when there is none to tell."""
+    if api_key_mode():
+        return {'error': 'apiKey'}
+    if not os.path.exists(TOKEN_FILE):
+        return {'error': 'login'}
+    credits = {}
+
+    def read_credits():
+        try:
+            credits.update(agy_command('credits'))
+        except AgyError:
+            pass  # the quota is what matters; credits are said only when known
+
+    other = threading.Thread(target=read_credits, daemon=True)
+    other.start()
+    try:
+        data = agy_command('usage')
+    except AgyError as e:
+        return {'error': str(e)}
+    groups = []
+    for g in data.get('groups') or []:
+        if not isinstance(g, dict):
+            continue
+        models = re.sub(r'^Models within this group:\s*', '', g.get('description') or '') \
+            if (g.get('description') or '').startswith('Models within this group:') else ''
+        limits = [{'id': b.get('id', ''), 'window': b.get('window', ''), 'name': b.get('name', ''),
+                   'remaining': b.get('remaining_fraction'), 'resetsAt': b.get('reset_time') or ''}
+                  for b in g.get('buckets') or [] if isinstance(b, dict)]
+        groups.append({'name': g.get('name', ''), 'models': models, 'limits': limits})
+    other.join(30)
+    out = {'groups': groups}
+    if isinstance(credits.get('remaining_credits'), (int, float)):
+        out['credits'] = credits['remaining_credits']
+    return out
+
+
 def read_config():
     threading.Thread(target=find_models, daemon=True).start()  # a no-op unless something changed
     saved = read_json(MODELS_FILE, {})
@@ -2050,6 +2111,9 @@ class Handler(BaseHTTPRequestHandler):
     def get_account(self, q):
         self.reply(200, account())
 
+    def get_usage(self, q):
+        self.reply(200, plan_usage())
+
     def get_memory(self, q):
         path = memory_path(q.get('scope'), q.get('cwd'))
         try:
@@ -2225,7 +2289,7 @@ class Handler(BaseHTTPRequestHandler):
     # body (POST). /upload is not here: its body is the file, read as it is streamed to disk.
     GET = {'/health': get_health, '/events': get_events, '/image': get_image, '/sessions': get_sessions,
            '/search': get_search, '/history': get_history, '/config': get_config, '/launch': get_launch,
-           '/memory': get_memory, '/dirs': get_dirs, '/account': get_account}
+           '/memory': get_memory, '/dirs': get_dirs, '/account': get_account, '/usage': get_usage}
     POST = {'/context': post_context, '/send': post_send, '/open': post_open, '/launch': post_launch,
             '/memory': post_memory, '/auth': post_auth, '/login': post_login, '/login-code': post_login_code,
             '/logout': post_logout, '/cancel': post_cancel, '/stop': post_stop, '/delete': post_delete, '/delete-all': post_delete_all,

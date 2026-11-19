@@ -42,6 +42,22 @@ if a[:1] == ['--version']:
 if a[:1] == ['models']:  # as the real one: it wants the terminal's own sign-in, which the app's is not
     sys.stderr.write('Fetching available models...\nError: Please sign in to view available models. Launch the CLI without arguments to sign in.\n')
     sys.exit(1)
+if a[:1] == ['-p']:  # a read-only slash command in print mode: as the real one answers it (signed in from the app too)
+    if not os.path.exists(token):
+        print(json.dumps({'conversation_id': '', 'status': 'ERROR', 'response': 'Error: You are not signed in.'})); sys.exit(1)
+    if a[1] == '/usage':
+        data = {'description': 'Within each group, models share a weekly limit and a 5-hour limit.', 'groups': [
+            {'name': 'Gemini Models', 'description': 'Models within this group: Gemini 4 Neon, Gemini 3.8 Flash', 'buckets': [
+                {'id': 'gemini-weekly', 'name': 'Weekly Limit Remaining', 'window': 'weekly', 'remaining_fraction': 0.9675, 'reset_time': '2026-11-25T06:50:07Z'},
+                {'id': 'gemini-5h', 'name': 'Five Hour Limit Remaining', 'window': '5h', 'remaining_fraction': 0.15, 'reset_time': '2026-11-19T04:48:23Z'}]},
+            {'name': 'Gemini 4 Argon', 'description': 'For paid Pro plans, Argon quota is separate.', 'buckets': [
+                {'id': 'gemini-argon-wtu-weekly', 'name': 'Gemini 4 Argon Weekly Limit', 'window': 'weekly', 'remaining_fraction': 1, 'reset_time': '2026-11-25T06:49:19Z'}]}]}
+    elif a[1] == '/credits':
+        data = {'remaining_credits': 0, 'upgrade_uri': 'https://antigravity.google/g1-upgrade'}
+    else:
+        sys.exit(2)
+    print(json.dumps({'conversation_id': '', 'status': 'SUCCESS', 'response': '', 'num_turns': 0, 'command': {'name': a[1][1:], 'data': data}}))
+    sys.exit(0)
 if a[:2] == ['acp', '--login']:
     print('Open this link in a browser to log in with Google:\n\n  https://accounts.google.com/o/oauth2/auth?client_id=x&state=y\n')
     sys.stdout.write('Then paste the authorization code, or the full URL of the page you land on, and press Enter: ')
@@ -355,6 +371,8 @@ def main():
     settle('c0', 1)
     keep_events('c0', 'a message before signing in')
 
+    call('GET', '/usage')  # not signed in: no quota to tell
+
     # ---- signing in with Google: a link, then the code the page shows ----
     call('POST', '/login', {})
     call('POST', '/login-code', {'code': 'bad-code'})
@@ -362,6 +380,7 @@ def main():
     call('POST', '/login', {})
     call('POST', '/login-code', {'code': 'good-code'})
     call('GET', '/account')
+    call('GET', '/usage')  # the quota, as /usage tells it to the app's sign-in
     wait_for(lambda: bridge.read_json(bridge.MODELS_FILE, {}).get('models') and not bridge.models_lock.locked())
     call('GET', '/config')
     # the session made to read them is gone again: no file of it, not in the list
