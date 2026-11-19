@@ -1,4 +1,4 @@
-# Antigravity for Android (v0.1.3)
+# Antigravity for Android (v0.1.4)
 
 Google's Antigravity CLI (`agy`) on the phone in one app, no Termux needed: its own application id
 (`com.jeep.antigravity`), name and icon. No WebView: the interface is plain Android views (Java), so
@@ -45,6 +45,10 @@ Protocol (`agy acp`).
   `reject_once`. The app's permission modes are agy's (default, accept-edits, auto, plan) and
   全部允许, where the bridge answers yes itself. A question still open when the turn ends is
   cancelled.
+- agy's first session after it starts is the slow one (1.2 to 2.7 s with no network, 3 to 5 s on the phone signed
+  in with Google, which also makes its first connections; the next ones 0.15 s): when the app opens a conversation the bridge starts agy and makes one session ahead,
+  deleted at once as for the models (`agy primed` in the log). `reply began after X s` in the log
+  says how long a reply took to begin, in parts: session ready, prompt sent, the model's first output.
 - A message written while a reply runs waits below it; with 插入 (the default) it is sent as soon as
   the reply runs a tool, as another `session/prompt`: agy takes it into the running turn and ends the
   prompt before it, at which point the app shows it as a message of the conversation. It cannot be

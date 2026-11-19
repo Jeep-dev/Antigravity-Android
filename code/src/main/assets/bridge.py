@@ -30,7 +30,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 3  # Bridge VERSION in the app: an app update replaces an older running bridge
+VERSION = 4  # Bridge VERSION in the app: an app update replaces an older running bridge
 HOME = os.path.expanduser('~')
 GEMINI_DIR = os.path.join(HOME, '.gemini')
 AGY_DIR = os.environ.get('AGY_DATA_DIR') or os.path.join(GEMINI_DIR, 'antigravity-cli')
@@ -398,6 +398,7 @@ class Agy:
         self.early = {}  # session id -> updates that came before a conversation took the session (session/new's)
         self.args_used = None
         self.last_error = ''
+        self.primed_gen = -1  # the process (gen) that has made or loaded a session: its first one is the slow one
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
@@ -575,12 +576,15 @@ class Agy:
         return slot
 
     def request(self, method, params, timeout=60):
+        gen = self.gen
         slot = self.call(method, params)
         if not slot['event'].wait(timeout):
             self.pending.pop(slot['id'], None)
             raise AgyError('agy %d 秒没有回应（%s）' % (timeout, method))
         if slot.get('error') is not None:
             raise slot['error']
+        if method in ('session/new', 'session/load'):
+            self.primed_gen = gen
         return slot.get('result')
 
     def stop(self, reason):
@@ -828,6 +832,7 @@ class Chat:
         self.totals = {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'thinking': 0}
         self.user_messages = 0
         self.tool_calls = 0
+        self.timing = None  # when the running turn's message came, its session was ready, its prompt went
         # The reply being translated into the app's stream-json.
         self.msg_id = None
         self.msg_n = 0
@@ -873,10 +878,28 @@ class Chat:
                 self.last_error = error_text(text_of(u.get('content')))
                 log('chat %s: agy says: %s' % (self.key[:8], self.last_error[:300]))
                 return  # told as the turn's error when it ends
+            self.first_output(kind)
             self.transcript.apply(u)
             if self.replaying or not self.running or not self.key:
                 return
             self.translate(u)
+
+    def mark(self, what):
+        with self.lock:
+            if self.timing is not None:
+                self.timing[what] = time.time()
+
+    def first_output(self, kind):
+        """Logs how long the reply took to begin, in its parts: the message to a session made or loaded
+        (agy's first one is slow), to the prompt sent, and the model's first output (thinking, text, a tool)."""
+        t = self.timing
+        if t is None or self.replaying or not self.running or kind not in ('agent_message_chunk', 'agent_thought_chunk', 'tool_call'):
+            return
+        self.timing = None
+        now = time.time()
+        session, prompted = t.get('session', t['sent']), t.get('prompted', t['sent'])
+        log('chat %s: reply began after %.1fs (agy running): session ready %.1fs, prompt sent %.1fs, model answered %.1fs'
+            % ((self.key or '-')[:8], now - t['sent'], session - t['sent'], prompted - t['sent'], now - prompted))
 
     def block(self, kind):
         """The app's stream has a block of this kind open (text or thinking), the one before closed."""
@@ -1038,6 +1061,7 @@ class Chat:
             if not inserting:
                 self.running = True
                 self.last_error = ''
+                self.timing = {'sent': time.time()}
             turn = self.turn
         hub.emit(self.key, 'state', {'running': True})
         threading.Thread(target=self.deliver, args=(text, images, inserting, message_uuid, turn), daemon=True).start()
@@ -1048,6 +1072,7 @@ class Chat:
                 self.prompt(text, images, message_uuid)
                 return
             self.ready_session()
+            self.mark('session')
             name = re.match(r'^/(?:name|rename)\s+(\S[\s\S]*)$', text.strip()) if not images else None
             if name:  # /name: the app's own name for it, not a message to the model
                 with self.lock:
@@ -1178,6 +1203,8 @@ class Chat:
                 self.transcript.user(text, refs)
                 self.turn_start = len(self.transcript.messages)
                 self.user_messages += 1
+            if message_uuid is None:
+                self.mark('prompted')
             slot = agy.call('session/prompt', {'sessionId': self.session_id, 'prompt': blocks}, then=self.answered)
             self.prompts.append(slot['id'])
             if message_uuid is not None:
@@ -1384,14 +1411,46 @@ def reaper():
 
 
 def warm():
-    """agy started ahead (once signed in) when the app opens a conversation, unless it could not be lately."""
+    """agy started ahead (once signed in) when the app opens a conversation, unless it could not be lately,
+    and its first session made ahead too (prime)."""
     agy.used = time.time()
-    if agy.alive() or not os.path.exists(agy_path()) or not signed_in() or time.time() < agy.retry_at:
+    if not os.path.exists(agy_path()) or not signed_in() or time.time() < agy.retry_at:
         return
     try:
         agy.ensure()
     except (AgyError, RpcError) as e:
         log('agy not started ahead: %s' % e)
+        return
+    prime()
+
+
+def prime():
+    """The first session a new agy makes takes seconds (1.2 to 2.7 s measured on the phone with no network,
+    3 to 5 s in the app signed in with Google, which makes its first connections then) and the next ones a
+    fraction of that: one is made ahead and deleted at once, as for the models,
+    so a conversation's first message does not wait for it. A no-op once this agy has made a session."""
+    if agy.primed_gen == agy.gen or not models_lock.acquire(blocking=False):
+        return
+    sid = None
+    try:
+        if agy.primed_gen == agy.gen:
+            return
+        os.makedirs(DEFAULT_CWD, exist_ok=True)
+        began = time.time()
+        sid = (agy.request('session/new', {'cwd': DEFAULT_CWD, 'mcpServers': []}, timeout=90) or {}).get('sessionId')
+        log('agy primed: its first session took %.1fs' % (time.time() - began))
+    except (AgyError, RpcError, OSError) as e:
+        log('agy not primed: %s' % e)
+    finally:
+        if sid:
+            with agy.lock:
+                agy.early.pop(sid, None)
+            try:
+                agy.request('session/close', {'sessionId': sid}, timeout=10)
+            except (AgyError, RpcError):
+                pass
+            remove_session_files(sid)
+        models_lock.release()
 
 
 # ---- Saved sessions (agy's own list, and the transcripts kept here) ----
