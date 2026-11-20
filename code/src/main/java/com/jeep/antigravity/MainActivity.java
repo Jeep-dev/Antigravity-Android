@@ -280,6 +280,7 @@ public final class MainActivity extends Activity implements Bridge.Events {
     private void onEvent(JSONObject ev) {
         if ("gap".equals(ev.optString("kind"))) { gap(); return; }
         if ("config".equals(ev.optString("kind"))) { readConfig(); return; }
+        if ("voice".equals(ev.optString("kind"))) { voice.onBridgeEvent(ev.optJSONObject("data")); return; }
         Chat chat = chatFor(ev);
         if (chat == null) return;
         chat.lastEvent = System.currentTimeMillis();

@@ -14,23 +14,27 @@ Standard library only.
 import argparse
 import json
 import os
+import queue
 import re
 import select
 import shlex
 import shutil
 import signal
+import socket
 import socketserver
 import sqlite3
+import struct
 import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlparse
 
-VERSION = 4  # Bridge VERSION in the app: an app update replaces an older running bridge
+VERSION = 5  # Bridge VERSION in the app: an app update replaces an older running bridge
 HOME = os.path.expanduser('~')
 GEMINI_DIR = os.path.join(HOME, '.gemini')
 AGY_DIR = os.environ.get('AGY_DATA_DIR') or os.path.join(GEMINI_DIR, 'antigravity-cli')
@@ -50,6 +54,7 @@ ACCOUNT_FILE = os.path.join(STATE_DIR, 'account.json')  # who signed in from the
 KEY_FILE = os.path.join(STATE_DIR, 'gemini-api-key')  # a Gemini API key given in the app (mode 0600)
 HISTORY_DIR = os.path.join(STATE_DIR, 'history')  # each session as the app shows it, kept for the next read
 IMAGES_DIR = os.path.join(STATE_DIR, 'images')  # pictures sent from the app (agy replays no pictures)
+VOICE_DIR = os.path.join(STATE_DIR, 'voice')  # isolated working folder for agy's dictation TUI
 TOKEN_FILE = os.path.join(AGY_DIR, 'antigravity-oauth-token')
 SUMMARIES_DB = os.path.join(AGY_DIR, 'conversation_summaries.db')
 AGY_SETTINGS = os.path.join(AGY_DIR, 'settings.json')
@@ -59,6 +64,7 @@ EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 BYPASS = 'bypassPermissions'
 APP_MODES = {'default': 'default', 'acceptEdits': 'accept-edits', 'auto': 'auto', 'plan': 'plan'}
 IDLE_STOP = 30 * 60  # agy (a few hundred MB) is stopped after this long unused; started again when needed
+VOICE_IDLE_STOP = 15 * 60  # dictation agy TUI is stopped after this long unused
 SHORT_TITLE = 60  # characters of a first message shown as its conversation's name
 ERROR_MARK = '\u26a0'  # agy says a failed request in the reply's text, after this sign
 
@@ -1544,6 +1550,7 @@ def reaper():
                 agy.stop(agy.restart_reason)
             elif agy.alive() and time.time() - agy.used > IDLE_STOP:
                 agy.stop('unused for %d minutes' % (IDLE_STOP // 60))
+        voice_dictator.reap()
         with chats_lock:
             cutoff = time.time() - IDLE_STOP
             for sid in [sid for sid, c in loose.items() if not c.running and c.used < cutoff]:
@@ -2186,6 +2193,7 @@ class Login:
             reset_models_tried()
             log('signed in as %s' % text)
             agy.restart_when_idle('signed in')
+            voice_dictator.stop('signed in')
             threading.Thread(target=find_models, daemon=True).start()
             hub.emit('', 'config')
         else:
@@ -2226,7 +2234,648 @@ def logout():
     except OSError:
         pass
     agy.restart_when_idle('signed out')
+    voice_dictator.stop('signed out')
     hub.emit('', 'config')
+
+
+# ---- Voice dictation (agy /voice dictate via ANTIGRAVITY_MIC) ----
+
+class VtScreen:
+    """Minimal VT100 screen buffer for reading agy's prompt box and status line during dictation."""
+
+    def __init__(self, rows=40, cols=200):
+        self.rows, self.cols = rows, cols
+        self.grid = [[' '] * cols for _ in range(rows)]
+        self.dim = [[False] * cols for _ in range(rows)]
+        self.cur_dim = False
+        self.r = 0
+        self.c = 0
+        self.buf = ''
+
+    @staticmethod
+    def _width(ch):
+        return 2 if unicodedata.east_asian_width(ch) in ('W', 'F') else 1
+
+    def _scroll_up(self):
+        self.grid.pop(0)
+        self.grid.append([' '] * self.cols)
+        self.dim.pop(0)
+        self.dim.append([False] * self.cols)
+
+    def _scroll_down(self):
+        self.grid.pop()
+        self.grid.insert(0, [' '] * self.cols)
+        self.dim.pop()
+        self.dim.insert(0, [False] * self.cols)
+
+    def feed(self, text):
+        self.buf += text
+        i, n = 0, len(self.buf)
+        while i < n:
+            ch = self.buf[i]
+            if ch == '\x1b':
+                if i + 1 >= n:
+                    break
+                nxt = self.buf[i + 1]
+                if nxt == '[':
+                    m = re.match(r'\x1b\[([0-9;?<>!=]*?)([A-Za-z@`~])', self.buf[i:])
+                    if not m:
+                        if n - i < 48:
+                            break
+                        i += 1
+                        continue
+                    params, cmd = m.group(1), m.group(2)
+                    i += m.end()
+                    if not params or params[0] not in '?><=!':
+                        ps = [int(x) if x else 0 for x in params.split(';')] if params else [0]
+                        p1 = ps[0]
+                        p2 = ps[1] if len(ps) > 1 else 0
+                        if cmd == 'm':
+                            k = 0
+                            while k < len(ps):
+                                v = ps[k]
+                                if v in (0, 22):
+                                    self.cur_dim = False
+                                elif v in (2, 90):
+                                    self.cur_dim = True
+                                elif v in (38, 48) and k + 1 < len(ps):
+                                    if ps[k + 1] == 5 and k + 2 < len(ps):
+                                        if v == 38:
+                                            self.cur_dim = (ps[k + 2] == 8 or 232 <= ps[k + 2] <= 246)
+                                        k += 2
+                                    elif ps[k + 1] == 2 and k + 4 < len(ps):
+                                        if v == 38:
+                                            r_, g_, b_ = ps[k + 2], ps[k + 3], ps[k + 4]
+                                            self.cur_dim = (abs(r_ - g_) < 15 and abs(g_ - b_) < 15 and 60 <= r_ <= 170)
+                                        k += 4
+                                elif 30 <= v <= 37 or v == 39 or 91 <= v <= 97:
+                                    self.cur_dim = False
+                                k += 1
+                        elif cmd in ('H', 'f'):
+                            self.r = max(0, min(self.rows - 1, (p1 or 1) - 1))
+                            self.c = max(0, min(self.cols - 1, (p2 or 1) - 1))
+                        elif cmd == 'A':
+                            self.r = max(0, self.r - (p1 or 1))
+                        elif cmd == 'B':
+                            self.r = min(self.rows - 1, self.r + (p1 or 1))
+                        elif cmd == 'C':
+                            self.c = min(self.cols - 1, self.c + (p1 or 1))
+                        elif cmd == 'D':
+                            self.c = max(0, self.c - (p1 or 1))
+                        elif cmd == 'I':
+                            for _ in range(p1 or 1):
+                                self.c = min(self.cols - 1, (self.c + 8) & ~7)
+                        elif cmd == 'Z':
+                            for _ in range(p1 or 1):
+                                self.c = max(0, ((self.c - 1) // 8) * 8) if self.c > 0 else 0
+                        elif cmd == 'G':
+                            self.c = max(0, min(self.cols - 1, (p1 or 1) - 1))
+                        elif cmd == 'd':
+                            self.r = max(0, min(self.rows - 1, (p1 or 1) - 1))
+                        elif cmd == 'K':
+                            if p1 == 0:
+                                self.grid[self.r][self.c:] = [' '] * (self.cols - self.c)
+                                self.dim[self.r][self.c:] = [False] * (self.cols - self.c)
+                            elif p1 == 1:
+                                self.grid[self.r][:self.c + 1] = [' '] * (self.c + 1)
+                                self.dim[self.r][:self.c + 1] = [False] * (self.c + 1)
+                            elif p1 == 2:
+                                self.grid[self.r] = [' '] * self.cols
+                                self.dim[self.r] = [False] * self.cols
+                        elif cmd == 'J':
+                            if p1 == 0:
+                                self.grid[self.r][self.c:] = [' '] * (self.cols - self.c)
+                                self.dim[self.r][self.c:] = [False] * (self.cols - self.c)
+                                for rr in range(self.r + 1, self.rows):
+                                    self.grid[rr] = [' '] * self.cols
+                                    self.dim[rr] = [False] * self.cols
+                            elif p1 == 2:
+                                self.grid = [[' '] * self.cols for _ in range(self.rows)]
+                                self.dim = [[False] * self.cols for _ in range(self.rows)]
+                        elif cmd == 'L':
+                            for _ in range(min(p1 or 1, self.rows - self.r)):
+                                self.grid.pop()
+                                self.grid.insert(self.r, [' '] * self.cols)
+                                self.dim.pop()
+                                self.dim.insert(self.r, [False] * self.cols)
+                        elif cmd == 'M':
+                            for _ in range(min(p1 or 1, self.rows - self.r)):
+                                self.grid.pop(self.r)
+                                self.grid.append([' '] * self.cols)
+                                self.dim.pop(self.r)
+                                self.dim.append([False] * self.cols)
+                        elif cmd == 'P':
+                            cnt = min(p1 or 1, self.cols - self.c)
+                            del self.grid[self.r][self.c:self.c + cnt]
+                            self.grid[self.r].extend([' '] * cnt)
+                            del self.dim[self.r][self.c:self.c + cnt]
+                            self.dim[self.r].extend([False] * cnt)
+                        elif cmd == 'X':
+                            cnt = min(p1 or 1, self.cols - self.c)
+                            self.grid[self.r][self.c:self.c + cnt] = [' '] * cnt
+                            self.dim[self.r][self.c:self.c + cnt] = [False] * cnt
+                    continue
+                elif nxt == ']':
+                    end = self.buf.find('\x07', i + 2)
+                    st = self.buf.find('\x1b\\', i + 2)
+                    if end >= 0 and (st < 0 or end < st):
+                        i = end + 1
+                        continue
+                    if st >= 0:
+                        i = st + 2
+                        continue
+                    if n - i < 512:
+                        break
+                    i += 1
+                    continue
+                elif nxt == 'M':
+                    if self.r > 0:
+                        self.r -= 1
+                    else:
+                        self._scroll_down()
+                    i += 2
+                    continue
+                elif nxt in ('(', ')', '*', '+'):
+                    if i + 2 >= n:
+                        break
+                    i += 3
+                    continue
+                else:
+                    i += 2
+                    continue
+            elif ch == '\r':
+                self.c = 0
+                i += 1
+            elif ch == '\n':
+                self.r += 1
+                if self.r >= self.rows:
+                    self._scroll_up()
+                    self.r = self.rows - 1
+                i += 1
+            elif ch == '\b':
+                self.c = max(0, self.c - 1)
+                i += 1
+            elif ch == '\t':
+                self.c = min(self.cols - 1, (self.c + 8) & ~7)
+                i += 1
+            elif ord(ch) < 32:
+                i += 1
+            else:
+                w = self._width(ch)
+                if self.c + w > self.cols:
+                    self.c = 0
+                    self.r += 1
+                    if self.r >= self.rows:
+                        self._scroll_up()
+                        self.r = self.rows - 1
+                self.grid[self.r][self.c] = ch
+                self.dim[self.r][self.c] = self.cur_dim
+                if w == 2 and self.c + 1 < self.cols:
+                    self.grid[self.r][self.c + 1] = ''
+                    self.dim[self.r][self.c + 1] = self.cur_dim
+                self.c += w
+                i += 1
+        self.buf = self.buf[i:]
+
+    def snapshot(self):
+        """Returns (prompt_text_or_None, status_below, above_lines, all_text)."""
+        lines = [''.join(row).rstrip() for row in self.grid]
+        bars = [idx for idx, line in enumerate(lines) if len(line) >= 20 and set(line) == {'─'}]
+        top = bot = None
+        for idx in range(len(bars) - 1, -1, -1):
+            b = bars[idx]
+            if b + 1 < len(lines) and lines[b + 1].startswith('>'):
+                top = b
+                bot = bars[idx + 1] if idx + 1 < len(bars) else len(lines)
+                break
+        if top is None:
+            return None, '', [], '\n'.join(lines)
+        parts = []
+        for idx, rr in enumerate(range(top + 1, bot)):
+            row_chars = self.grid[rr]
+            row_dim = self.dim[rr]
+            start = 2 if (idx == 0 and ''.join(row_chars[:2]) == '> ') else (1 if (idx == 0 and row_chars[0] == '>') else 0)
+            non_space = [(c, d) for c, d in zip(row_chars[start:], row_dim[start:]) if c and c != ' ']
+            if non_space and all(d for _, d in non_space):
+                continue
+            txt = ''.join(row_chars[start:]).rstrip()
+            if idx > 0 and txt.startswith('  '):
+                txt = txt[2:]
+            if txt:
+                parts.append(txt)
+        joined = ''
+        for p in parts:
+            if not joined:
+                joined = p
+            elif ord(joined[-1]) < 128 and ord(p[0]) < 128 and (joined[-1].isalnum() or joined[-1] in '.,!?;:') and p[0].isalnum():
+                joined += ' ' + p
+            else:
+                joined += p
+        status = '\n'.join(lines[bot + 1:bot + 4]).strip() if bot < len(lines) else ''
+        above = [l.strip() for l in lines[max(0, top - 6):top] if l.strip()]
+        return joined.strip(), status, above, '\n'.join(lines)
+
+
+class VoiceDictator:
+    """Drives a warm interactive `agy` PTY with ANTIGRAVITY_MIC so the app can use Antigravity's
+    native subscription voice dictation (/voice dictate) with live interim transcripts."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.run_lock = threading.Lock()
+        self.proc = None
+        self.fd = None
+        self.srv = None
+        self.port = 0
+        self.screen = None
+        self.ready = False
+        self.used = 0.0
+        self.busy = False
+        self.active = None  # dict for the active dictation session
+
+    def _alive(self):
+        return self.proc is not None and self.proc.poll() is None and self.fd is not None
+
+    def _mic_accept_loop(self, srv):
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                break
+            threading.Thread(target=self._serve_mic, args=(conn,), daemon=True).start()
+
+    def _serve_mic(self, conn):
+        try:
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        sess = self.active
+        if sess is None:
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return
+        sess['mic_connected'].set()
+        q = sess['pcm']
+        try:
+            while not sess['close_mic'].is_set():
+                try:
+                    chunk = q.get(timeout=0.1)
+                except queue.Empty:
+                    if sess['eof'].is_set():
+                        # Keep feeding silence briefly while agy finishes after Enter
+                        chunk = b'\x00' * 3200
+                    else:
+                        continue
+                if chunk is None:
+                    break
+                conn.sendall(chunk)
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def _read_pty(self, proc, fd, screen):
+        while True:
+            try:
+                r, _, _ = select.select([fd], [], [], 0.5)
+                if r:
+                    data = os.read(fd, 16384)
+                    if not data:
+                        break
+                    text = data.decode('utf-8', 'replace')
+                    with self.lock:
+                        if self.screen is screen:
+                            screen.feed(text)
+                            self._on_screen_locked()
+            except OSError:
+                break
+            if proc.poll() is not None:
+                break
+        with self.lock:
+            if self.proc is proc:
+                self.ready = False
+                if self.fd is fd:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    self.fd = None
+                self.proc = None
+
+    def _on_screen_locked(self):
+        sess = self.active
+        if sess is None or self.screen is None:
+            return
+        box, status, above, _ = self.screen.snapshot()
+        sess['last_status'] = status
+        sess['last_above'] = above
+        if 'Recording' in status and not sess['recording']:
+            sess['recording'] = True
+            hub.emit('', 'voice', {'id': sess['id'], 'state': 'recording'})
+        if box is not None and box != sess['last_text']:
+            if box or sess['recording']:
+                sess['last_text'] = box
+                if box and not sess['cancelled'].is_set():
+                    hub.emit('', 'voice', {'id': sess['id'], 'state': 'partial', 'text': box})
+        if sess['finishing'] and 'Recording' not in status and 'Connecting' not in status and 'Finishing' not in status:
+            sess['finished'].set()
+
+    def ensure(self, timeout=20):
+        import fcntl
+        import pty
+        import termios
+        if not os.path.exists(agy_path()):
+            raise AgyError('agy 还没装好')
+        if not os.path.exists(TOKEN_FILE):
+            raise AgyError('需要先用 Google 账号登录才能使用 Antigravity 听写')
+        with self.lock:
+            self.used = time.time()
+            if self._alive() and self.ready:
+                return
+            if not self._alive():
+                self._stop_locked('restart')
+                os.makedirs(VOICE_DIR, exist_ok=True)
+                srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                srv.bind(('127.0.0.1', 0))
+                srv.listen(4)
+                port = srv.getsockname()[1]
+                master, slave = pty.openpty()
+                try:
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 200, 0, 0))
+                except OSError:
+                    pass
+                env = agy_env()
+                env.pop('GEMINI_API_KEY', None)
+                env['ANTIGRAVITY_MIC'] = '127.0.0.1:%d' % port
+                env['TERM'] = 'xterm-256color'
+                try:
+                    proc = subprocess.Popen(
+                        [agy_path()],
+                        cwd=VOICE_DIR, env=env, stdin=slave, stdout=slave, stderr=slave,
+                        start_new_session=True, close_fds=True,
+                    )
+                except OSError as e:
+                    os.close(master)
+                    os.close(slave)
+                    srv.close()
+                    raise AgyError('没能启动语音听写进程：%s' % e)
+                os.close(slave)
+                screen = VtScreen(40, 200)
+                self.proc, self.fd, self.srv, self.port, self.screen, self.ready = proc, master, srv, port, screen, False
+                threading.Thread(target=self._mic_accept_loop, args=(srv,), daemon=True).start()
+                threading.Thread(target=self._read_pty, args=(proc, master, screen), daemon=True).start()
+                log('voice: started agy pid %d on mic port %d' % (proc.pid, port))
+        deadline = time.time() + timeout
+        trusted = False
+        dismissed = False
+        while time.time() < deadline:
+            with self.lock:
+                if not self._alive():
+                    raise AgyError('语音听写进程启动后退出了')
+                if self.ready:
+                    return
+                box, status, _, all_txt = self.screen.snapshot()
+                fd = self.fd
+            if 'Do you trust' in all_txt and not trusted:
+                trusted = True
+                try:
+                    os.write(fd, b'\r')
+                except OSError:
+                    pass
+            elif box is not None and '? for shortcuts' in all_txt:
+                if 'esc to dismiss' in all_txt and not dismissed:
+                    dismissed = True
+                    try:
+                        os.write(fd, b'\x1b')
+                    except OSError:
+                        pass
+                    time.sleep(0.15)
+                    continue
+                with self.lock:
+                    self.ready = True
+                log('voice: agy dictation ready')
+                return
+            time.sleep(0.1)
+        self.stop('startup timeout')
+        raise AgyError('Antigravity 听写启动超时，请重试')
+
+    def warm(self):
+        if not os.path.exists(agy_path()) or not os.path.exists(TOKEN_FILE):
+            return
+        try:
+            self.ensure(timeout=20)
+        except AgyError as e:
+            log('voice: warm failed: %s' % e)
+
+    def _clear_prompt(self):
+        with self.lock:
+            fd = self.fd
+            screen = self.screen
+        if fd is None or screen is None:
+            return
+        try:
+            os.write(fd, b'\x1f')  # Ctrl+_ undo dictation
+        except OSError:
+            return
+        time.sleep(0.15)
+        with self.lock:
+            box, _, _, _ = screen.snapshot()
+        if box:
+            try:
+                os.write(fd, b'\x01\x0b\x15')  # Ctrl+A Ctrl+K Ctrl+U
+            except OSError:
+                pass
+            time.sleep(0.15)
+
+    def cancel(self, vid=None):
+        with self.lock:
+            sess = self.active
+            if sess is None or (vid and sess['id'] != vid):
+                return False
+            sess['cancelled'].set()
+            sess['eof'].set()
+            sess['close_mic'].set()
+            fd = self.fd
+        if fd is not None:
+            try:
+                os.write(fd, b'\x1b')
+            except OSError:
+                pass
+        return True
+
+    def transcribe(self, rfile, vid):
+        """Streams raw 16kHz 16-bit mono PCM from rfile to agy /voice dictate until EOF, then
+        returns {'ok': True, 'text': ...} or raises AgyError."""
+        self.cancel()
+        with self.run_lock:
+            self.busy = True
+            self.used = time.time()
+            sess = {
+                'id': vid,
+                'pcm': queue.Queue(maxsize=200),
+                'eof': threading.Event(),
+                'close_mic': threading.Event(),
+                'cancelled': threading.Event(),
+                'mic_connected': threading.Event(),
+                'finished': threading.Event(),
+                'recording': False,
+                'finishing': False,
+                'last_text': '',
+                'last_status': '',
+                'last_above': [],
+            }
+            bytes_in = [0]
+
+            def read_audio():
+                try:
+                    while not sess['cancelled'].is_set():
+                        chunk = rfile.read1(4096) if hasattr(rfile, 'read1') else rfile.read(3200)
+                        if not chunk:
+                            break
+                        bytes_in[0] += len(chunk)
+                        try:
+                            sess['pcm'].put_nowait(chunk)
+                        except queue.Full:
+                            try:
+                                sess['pcm'].get_nowait()
+                            except queue.Empty:
+                                pass
+                            try:
+                                sess['pcm'].put_nowait(chunk)
+                            except queue.Full:
+                                pass
+                except OSError:
+                    sess['cancelled'].set()
+                finally:
+                    sess['eof'].set()
+
+            reader = threading.Thread(target=read_audio, daemon=True)
+            reader.start()
+            try:
+                hub.emit('', 'voice', {'id': vid, 'state': 'connecting'})
+                self.ensure(timeout=20)
+                if sess['cancelled'].is_set():
+                    return {'ok': True, 'text': '', 'cancelled': True}
+                self._clear_prompt()
+                with self.lock:
+                    self.active = sess
+                    fd = self.fd
+                if fd is None:
+                    raise AgyError('语音听写进程已断开')
+                os.write(fd, b'\x1b[15~')  # F5: start dictation
+                # Wait for audio stream EOF (user released button / tapped stop) or cancel
+                while not sess['eof'].is_set() and not sess['cancelled'].is_set():
+                    with self.lock:
+                        if not self._alive():
+                            raise AgyError('语音听写进程意外退出')
+                    time.sleep(0.05)
+                if sess['cancelled'].is_set():
+                    try:
+                        os.write(fd, b'\x1b')
+                    except OSError:
+                        pass
+                    return {'ok': True, 'text': '', 'cancelled': True}
+                # Wait briefly for agy to connect & drain any buffered audio spoken while connecting
+                t_drain = time.time()
+                while not sess['mic_connected'].is_set() and time.time() - t_drain < 3.0 and not sess['cancelled'].is_set():
+                    time.sleep(0.05)
+                while not sess['pcm'].empty() and time.time() - t_drain < 4.0 and not sess['cancelled'].is_set():
+                    time.sleep(0.05)
+                if bytes_in[0] < 3200:
+                    try:
+                        os.write(fd, b'\x1b')
+                    except OSError:
+                        pass
+                    return {'ok': True, 'text': '', 'notice': '说话时间太短'}
+                hub.emit('', 'voice', {'id': vid, 'state': 'finishing'})
+                with self.lock:
+                    sess['finishing'] = True
+                    # Check if agy already exited recording (e.g. error/timeout)
+                    st = sess['last_status']
+                    if 'Recording' not in st and 'Connecting' not in st and 'Finishing' not in st and sess['recording']:
+                        sess['finished'].set()
+                if not sess['finished'].is_set():
+                    try:
+                        os.write(fd, b'\r')  # Enter: finish & insert transcript
+                    except OSError:
+                        pass
+                sess['finished'].wait(timeout=10.0)
+                time.sleep(0.15)
+                sess['close_mic'].set()
+                with self.lock:
+                    box, status, above, _ = self.screen.snapshot() if self.screen else ('', '', [], '')
+                final_text = (box or sess['last_text'] or '').strip()
+                notice = ''
+                if not final_text:
+                    for line in reversed(above):
+                        if '⎿' in line:
+                            notice = line.split('⎿', 1)[1].strip()
+                            break
+                        if any(k in line.lower() for k in ('permission', 'sign in', 'logout', 'enterprise', 'business', 'error', 'failed')):
+                            notice = line
+                            break
+                self._clear_prompt()
+                if notice and not final_text:
+                    if 'permission' in notice.lower() or 'logout' in notice.lower() or 'sign in' in notice.lower():
+                        raise AgyError('语音听写缺少授权：请先退出 Google 账号并重新登录')
+                    if 'business' in notice.lower() or 'enterprise' in notice.lower():
+                        raise AgyError('企业/商业版 Google 账号暂不支持 Antigravity 听写')
+                hub.emit('', 'voice', {'id': vid, 'state': 'done', 'text': final_text})
+                return {'ok': True, 'text': final_text, 'notice': notice}
+            finally:
+                sess['eof'].set()
+                sess['close_mic'].set()
+                with self.lock:
+                    if self.active is sess:
+                        self.active = None
+                self.busy = False
+                self.used = time.time()
+
+    def reap(self):
+        if self.busy:
+            return
+        with self.lock:
+            if self._alive() and self.used and time.time() - self.used > VOICE_IDLE_STOP:
+                self._stop_locked('unused for %d minutes' % (VOICE_IDLE_STOP // 60))
+
+    def _stop_locked(self, reason=''):
+        proc, fd, srv = self.proc, self.fd, self.srv
+        self.proc = self.fd = self.srv = self.screen = None
+        self.port = 0
+        self.ready = False
+        if srv is not None:
+            try:
+                srv.close()
+            except OSError:
+                pass
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if proc is not None:
+            log('voice: stopping agy pid %d (%s)' % (proc.pid, reason))
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+
+    def stop(self, reason=''):
+        self.cancel()
+        with self.lock:
+            self._stop_locked(reason)
+
+
+voice_dictator = VoiceDictator()
 
 
 def list_dirs(path):
@@ -2307,6 +2956,8 @@ class Handler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == '/upload':
                 return self.upload()
+            if path == '/voice/audio':
+                return self.voice_audio()
             route = self.POST.get(path)
             if route is None:
                 return self.reply(404, {'error': 'not found'})
@@ -2473,6 +3124,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {'error': str(e)})
         self.reply(200, {'ok': True, 'path': path})
 
+    def post_voice_warm(self, data):
+        threading.Thread(target=voice_dictator.warm, daemon=True).start()
+        self.reply(200, {'ok': True, 'ready': voice_dictator.ready})
+
+    def post_voice_cancel(self, data):
+        vid = str(data.get('id') or '') or None
+        self.reply(200, {'ok': True, 'cancelled': voice_dictator.cancel(vid)})
+
+    def voice_audio(self):
+        q = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
+        vid = q.get('id') or uuid.uuid4().hex[:8]
+        result = voice_dictator.transcribe(self.rfile, vid)
+        self.reply(200, result)
+
     def upload(self):
         """A file the app attached, its bytes as the body (streamed to disk, never held whole), into
         the folder given; never over a file already there: name (1).ext, name (2).ext …"""
@@ -2560,7 +3225,8 @@ class Handler(BaseHTTPRequestHandler):
             '/memory': post_memory, '/auth': post_auth, '/login': post_login, '/login-code': post_login_code,
             '/logout': post_logout, '/cancel': post_cancel, '/stop': post_stop, '/delete': post_delete, '/delete-all': post_delete_all,
             '/rewind': post_rewind, '/delete-message': post_delete_message, '/title': post_title,
-            '/permission': post_permission, '/mkdir': post_mkdir}
+            '/permission': post_permission, '/mkdir': post_mkdir,
+            '/voice/warm': post_voice_warm, '/voice/cancel': post_voice_cancel}
 
 
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -2664,6 +3330,7 @@ def main():
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             log('stop pid %d: signal %d' % (os.getpid(), signum))
             login.cancel()
+            voice_dictator.stop('bridge shutdown')
             proc = agy.proc
             if proc is not None:
                 try:

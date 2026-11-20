@@ -136,6 +136,7 @@ final class Link extends Part {
         app.renderNow();
         app.drawer.loadSessions();
         app.loadHistory(app.current);
+        app.voice.warm();
         if (app.appPage.keepAlive == AppPage.UNKNOWN) app.appPage.keepAlive(false); // once a run: the userland is there now
     }
 }

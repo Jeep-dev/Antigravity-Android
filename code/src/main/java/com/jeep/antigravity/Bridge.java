@@ -167,6 +167,44 @@ final class Bridge {
         }
     }
 
+    /** Opens a streaming POST to the bridge (raw body, ended by shutdownOutput()). */
+    LocalSocket openStream(String path, String contentType) throws IOException {
+        LocalSocket s = new LocalSocket();
+        try {
+            s.connect(new LocalSocketAddress(socket, LocalSocketAddress.Namespace.FILESYSTEM));
+            s.setSoTimeout(30_000);
+            String head = "POST " + target(path) + " HTTP/1.1\r\nHost: bridge\r\nConnection: close\r\nContent-Type: " + contentType + "\r\n\r\n";
+            OutputStream out = s.getOutputStream();
+            out.write(head.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            return s;
+        } catch (IOException | RuntimeException e) {
+            try { s.close(); } catch (IOException ignored) { /* closed */ }
+            throw e;
+        }
+    }
+
+    /** Reads the HTTP JSON answer of a socket opened with {@link #openStream}, closing it. */
+    Object[] finishStream(LocalSocket s) {
+        try (Answer a = new Answer(s)) {
+            String[] status = line(a.in).split(" ");
+            try {
+                a.status = Integer.parseInt(status.length > 1 ? status[1] : "");
+                for (String h; !(h = line(a.in)).isEmpty(); ) {
+                    int colon = h.indexOf(':');
+                    if (colon > 0 && h.substring(0, colon).trim().equalsIgnoreCase("Content-Length")) {
+                        a.length = Long.parseLong(h.substring(colon + 1).trim());
+                    }
+                }
+            } catch (NumberFormatException e) {
+                throw new IOException("not an HTTP answer", e);
+            }
+            return new Object[]{a.status, readBody(a)};
+        } catch (IOException e) {
+            return new Object[]{-1, ""};
+        }
+    }
+
     /** Status of an exchange when nothing listens on the bridge's socket. */
     static final int REFUSED = -3;
 

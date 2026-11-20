@@ -2,6 +2,10 @@ package com.jeep.antigravity;
 
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.media.AudioFormat;
+import android.media.AudioRecord;
+import android.media.MediaRecorder;
+import android.net.LocalSocket;
 import android.os.Bundle;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
@@ -11,14 +15,20 @@ import android.view.MotionEvent;
 import android.widget.EditText;
 import android.widget.ImageView;
 
+import java.io.IOException;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Locale;
+import java.util.UUID;
+
+import org.json.JSONException;
+import org.json.JSONObject;
 
 /**
- * Speaking into the box: the mic button beside send. It listens with the phone's recognizer: the
- * system's default, or one picked in Settings.
- * Tapped, it listens until tapped again (a pause starts the next sentence); held, it listens
- * until let go. The words go in where the cursor is, as they are heard.
+ * Speaking into the box: the mic button beside send. It listens either with Antigravity's native
+ * subscription dictation (agy /voice dictate via ANTIGRAVITY_MIC) or with the phone's recognizer.
+ * Tapped, it listens until tapped again; held, it listens until let go. The words go in where the
+ * cursor is, as they are heard.
  */
 final class Voice extends Part {
     static final int ASK_MIC = 3;
@@ -46,6 +56,11 @@ final class Voice extends Part {
     /** Counts each listening: a restart left over from one ended is not taken by the next. */
     private int session;
     private final Runnable giveUp = this::finish;
+    /** Active Antigravity native dictation state. */
+    private boolean agyActive, agyConnecting;
+    private String agyId;
+    private volatile boolean agyRecording, agyCancelled;
+    private volatile LocalSocket agySocket;
     /**
      * The sentence as last heard (recognizers send it whole each time), and how much of it was given up to
      * the box: the user edited the box meanwhile, so only what is heard after that goes in, at the cursor
@@ -114,6 +129,10 @@ final class Voice extends Part {
         spanStart = Math.max(0, Math.min(in.getSelectionStart(), in.getSelectionEnd()));
         spanEnd = Math.max(spanStart, Math.max(in.getSelectionStart(), in.getSelectionEnd()));
         if (in.getSelectionStart() < 0) spanStart = spanEnd = in.length();
+        if (isAgy()) {
+            startAgy(hold);
+            return;
+        }
         listen = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE, language())
@@ -160,8 +179,182 @@ final class Voice extends Part {
         return country.isEmpty() ? lang : lang + "-" + country;
     }
 
-    /** The app came to the front: nothing is made ready ahead for the phone's recognizers. */
-    void warm() { }
+    private boolean isAgy() {
+        String mode = prefs.getString("voice", "");
+        if ("agy".equals(mode)) return true;
+        if ("android".equals(mode)) return false;
+        return prefs.getString("voiceService", "").isEmpty();
+    }
+
+    /** The app came to the front: warm agy's dictation process ahead when Antigravity dictation is active. */
+    void warm() {
+        if (isAgy() && app.link.linked) bridge.post("/voice/warm", new JSONObject(), null);
+    }
+
+    /** Starts streaming 16kHz mono PCM to the bridge for agy /voice dictate. */
+    private void startAgy(boolean hold) {
+        if (!app.link.linked) {
+            toast("后台还没启动好");
+            return;
+        }
+        on = true;
+        agyActive = true;
+        agyConnecting = true;
+        session++;
+        int mySession = session;
+        held = hold;
+        stopping = between = heard = restarted = false;
+        sentence = "";
+        givenUp = 0;
+        quiet = 0;
+        String vid = UUID.randomUUID().toString().substring(0, 8);
+        agyId = vid;
+        agyRecording = true;
+        agyCancelled = false;
+        paint();
+        Thread t = new Thread(() -> runAgy(vid, mySession), "agy-voice");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    @android.annotation.SuppressLint("MissingPermission")
+    private void runAgy(String vid, int mySession) {
+        int sampleRate = 16000;
+        int minBuf = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        int bufSize = Math.max(minBuf > 0 ? minBuf * 2 : 6400, 6400);
+        AudioRecord recorder = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
+        if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
+            recorder.release();
+            recorder = new AudioRecord(MediaRecorder.AudioSource.MIC,
+                    sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
+        }
+        if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
+            recorder.release();
+            ui.post(() -> {
+                if (session == mySession) {
+                    finish();
+                    toast("录不到声音：麦克风初始化失败");
+                }
+            });
+            return;
+        }
+        LocalSocket sock = null;
+        try {
+            sock = bridge.openStream("/voice/audio?id=" + android.net.Uri.encode(vid), "audio/pcm");
+            agySocket = sock;
+            OutputStream out = sock.getOutputStream();
+            recorder.startRecording();
+            byte[] pcm = new byte[3200]; // 100 ms of 16kHz 16-bit mono PCM
+            while (agyRecording && !agyCancelled) {
+                int n = recorder.read(pcm, 0, pcm.length);
+                if (n < 0) break;
+                if (n == 0) continue;
+                out.write(pcm, 0, n);
+                out.flush();
+                long sum = 0;
+                for (int i = 0; i + 1 < n; i += 2) {
+                    short sample = (short) ((pcm[i] & 0xff) | (pcm[i + 1] << 8));
+                    sum += (long) sample * sample;
+                }
+                float rms = (float) Math.sqrt(sum / (double) Math.max(1, n / 2)) / 32768f;
+                float level = Math.max(0f, Math.min(1f, rms * 8f));
+                ui.post(() -> {
+                    if (button != null && on && !stopping && session == mySession) {
+                        button.animate().scaleX(1f + 0.14f * level).scaleY(1f + 0.14f * level).setDuration(90).start();
+                    }
+                });
+            }
+        } catch (IOException e) {
+            boolean cancelled = agyCancelled;
+            String err = "";
+            if (sock != null) {
+                if (!cancelled) {
+                    Object[] r = bridge.finishStream(sock);
+                    try {
+                        err = new JSONObject((String) r[1]).optString("error");
+                    } catch (JSONException ignored) {
+                        // no JSON error body
+                    }
+                } else {
+                    try { sock.close(); } catch (IOException ignored) { /* closed */ }
+                }
+                sock = null;
+            }
+            if (!cancelled) {
+                String msg = err.isEmpty() ? "连不上语音听写服务" : err;
+                ui.post(() -> {
+                    if (session == mySession) {
+                        finish();
+                        toast(msg);
+                    }
+                });
+            }
+            return;
+        } finally {
+            try {
+                if (recorder.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) recorder.stop();
+            } catch (IllegalStateException ignored) {
+                // already stopped
+            }
+            recorder.release();
+        }
+        if (agyCancelled) {
+            try { sock.close(); } catch (IOException ignored) { /* closed */ }
+            return;
+        }
+        try {
+            sock.shutdownOutput();
+        } catch (IOException ignored) {
+            // bridge may have already closed
+        }
+        Object[] r = bridge.finishStream(sock);
+        int status = (int) r[0];
+        JSONObject data;
+        try {
+            data = new JSONObject((String) r[1]);
+        } catch (JSONException e) {
+            data = new JSONObject();
+        }
+        JSONObject reply = data;
+        ui.post(() -> {
+            if (session != mySession) return;
+            if (status == 200) {
+                String text = reply.optString("text");
+                String notice = reply.optString("notice");
+                if (!text.isEmpty()) {
+                    write(text);
+                    nextSentence();
+                } else if (!heard) {
+                    toast(!notice.isEmpty() && !notice.equalsIgnoreCase("No speech detected") ? notice : "没听清，请再说一次");
+                }
+            } else if (!agyCancelled) {
+                String err = reply.optString("error");
+                toast(err.isEmpty() ? "语音识别失败（" + status + "）" : err);
+            }
+            finish();
+        });
+    }
+
+    /** Live updates pushed by the bridge while agy /voice dictate is running. */
+    void onBridgeEvent(JSONObject data) {
+        if (!on || !agyActive || data == null) return;
+        if (!data.optString("id").equals(agyId)) return;
+        String state = data.optString("state");
+        if ("recording".equals(state)) {
+            agyConnecting = false;
+            paint();
+        } else if ("partial".equals(state)) {
+            agyConnecting = false;
+            String t = data.optString("text");
+            if (!t.isEmpty()) write(t);
+            paint();
+        } else if ("finishing".equals(state)) {
+            agyConnecting = false;
+            stopping = true;
+            paint();
+        }
+    }
 
     /** The app is left: listening ends. */
     void pause() {
@@ -200,17 +393,27 @@ final class Voice extends Part {
 
     /** What Settings shows: the recognizer in use. */
     String serviceLabel() {
+        if (isAgy()) return "Antigravity 听写";
         android.content.ComponentName c = chosen();
         if (c != null) return label(c);
         android.content.ComponentName d = systemDefault();
         return d == null ? "系统默认" : "系统默认 · " + label(d);
     }
 
-    /** Picks the recognizer to listen with: the system's default, or one of those on the phone. */
+    /** Picks the recognizer to listen with: Antigravity's own dictation, the system's default, or one on the phone. */
     void serviceSheet(Runnable after) {
         android.app.Dialog sheet = sheets.sheet("语音识别", null);
         android.widget.LinearLayout card = sheets.card(sheet);
-        String kept = chosen() == null ? "" : prefs.getString("voiceService", "");
+        boolean agy = isAgy();
+        String kept = agy || chosen() == null ? "" : prefs.getString("voiceService", "");
+        sheets.option(card, 0, "Antigravity 听写", "使用 Google 订阅 · 实时转写", false, () -> {
+            cancel();
+            prefs.edit().putString("voice", "agy").apply();
+            warm();
+            sheet.dismiss();
+            after.run();
+        });
+        if (agy) sheets.check(card);
         android.content.ComponentName d = systemDefault();
         sheets.option(card, 0, "系统默认", d == null ? null : label(d), false, () -> {
             cancel();
@@ -218,7 +421,7 @@ final class Voice extends Part {
             sheet.dismiss();
             after.run();
         });
-        if ("".equals(kept)) sheets.check(card);
+        if (!agy && "".equals(kept)) sheets.check(card);
         for (android.content.pm.ResolveInfo r : services()) {
             android.content.ComponentName c = new android.content.ComponentName(r.serviceInfo.packageName, r.serviceInfo.name);
             String flat = c.flattenToString();
@@ -228,7 +431,7 @@ final class Voice extends Part {
                 sheet.dismiss();
                 after.run();
             });
-            if (flat.equals(kept)) sheets.check(card);
+            if (!agy && flat.equals(kept)) sheets.check(card);
         }
         sheet.show();
     }
@@ -242,6 +445,14 @@ final class Voice extends Part {
     /** Ends listening; the words still on their way are written in. */
     void stop() {
         if (!on || stopping) return;
+        if (agyActive) {
+            stopping = true;
+            held = false;
+            agyRecording = false;
+            ui.postDelayed(giveUp, 15_000);
+            paint();
+            return;
+        }
         if (between) { if (!heard) toast("没听清，请再说一次"); finish(); return; }
         stopping = true;
         held = false;
@@ -252,6 +463,17 @@ final class Voice extends Part {
 
     /** Ends listening at once (sent, another conversation, the app left): what is written stays. */
     void cancel() {
+        if (agyActive) {
+            String cid = agyId;
+            agyCancelled = true;
+            agyRecording = false;
+            LocalSocket s = agySocket;
+            agySocket = null;
+            if (s != null) {
+                try { s.close(); } catch (IOException ignored) { /* closed */ }
+            }
+            if (cid != null) bridge.post("/voice/cancel", obj("id", cid), null);
+        }
         if (rec != null) rec.cancel();
         finish();
     }
@@ -260,6 +482,10 @@ final class Voice extends Part {
         ui.removeCallbacks(giveUp);
         if (rec != null) rec.destroy();
         rec = null;
+        agyActive = agyConnecting = false;
+        agyRecording = false;
+        agyId = null;
+        agySocket = null;
         session++;
         on = held = stopping = between = false;
         paint();
@@ -407,6 +633,9 @@ final class Voice extends Part {
         button.setImageTintList(android.content.res.ColorStateList.valueOf(col(lit ? R.color.onAccent : R.color.text)));
         if (!on) button.animate().scaleX(1f).scaleY(1f).setDuration(150).start();
         EditText in = app.box.input;
-        if (in != null) in.setHint(!on ? "回复 Antigravity…" : stopping ? "正在识别…" : held ? "正在听…松开结束" : "正在听…再点麦克风结束");
+        if (in != null) in.setHint(!on ? "回复 Antigravity…"
+                : stopping ? "正在识别…"
+                : agyActive && agyConnecting ? "正在连接 Antigravity 听写…"
+                : held ? "正在听…松开结束" : "正在听…再点麦克风结束");
     }
 }
