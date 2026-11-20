@@ -116,7 +116,9 @@ final class Images {
 
     /** Shows the image in the view when read; a view reused for another image meanwhile is left alone. */
     static void load(ImageView into, String src, File file, int maxPx, Runnable failed) {
-        String key = (src != null ? src.hashCode() + ":" + src.length() : String.valueOf(file)) + "@" + maxPx;
+        String id = src != null ? src.hashCode() + ":" + src.length()
+                : file != null ? file.getPath() + ":" + file.lastModified() + ":" + file.length() : "null";
+        String key = id + "@" + maxPx;
         into.setTag(R.id.image, key);
         Bitmap hit = cache.get(key);
         if (hit != null) { into.setImageBitmap(hit); return; }
@@ -165,12 +167,14 @@ final class Images {
                 w.setAttributes(a);
             }
         }
+        if (c instanceof android.app.Activity && (((android.app.Activity) c).isFinishing() || ((android.app.Activity) c).isDestroyed())) return;
         d.show();
         int px = Math.max(c.getResources().getDisplayMetrics().widthPixels, c.getResources().getDisplayMetrics().heightPixels);
         load(view, src, file, px * 2, () -> {
             if (!d.isShowing()) return; // closed before it was read
+            if (c instanceof android.app.Activity && (((android.app.Activity) c).isFinishing() || ((android.app.Activity) c).isDestroyed())) return;
             android.widget.Toast.makeText(c, "打不开这张图片", android.widget.Toast.LENGTH_SHORT).show();
-            d.dismiss();
+            try { d.dismiss(); } catch (IllegalArgumentException ignored) {}
         });
     }
 

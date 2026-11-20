@@ -2,6 +2,7 @@
 # Termux's proot for aarch64 (with its loader and libraries), which the app runs the Alpine
 # userland under. usage: fetch-proot.sh <out dir>
 set -eu
+mkdir -p "$1"
 OUT=$(realpath "$1")
 REPO=https://packages.termux.dev/apt/termux-main
 work=$(mktemp -d)
@@ -21,6 +22,6 @@ usr=data/data/com.termux/files/usr
 mkdir -p "$OUT"
 cp "$work/proot/$usr/bin/proot" "$OUT/proot"
 cp "$work/proot/$usr/libexec/proot/loader" "$OUT/loader"
-cp "$work/libtalloc/$usr/lib/libtalloc.so.2."* "$OUT/libtalloc.so.2"
+cp -L "$work/libtalloc/$usr/lib/libtalloc.so.2" "$OUT/libtalloc.so.2"
 cp "$work/libandroid-shmem/$usr/lib/libandroid-shmem.so" "$OUT/libandroid-shmem.so"
 ls -l "$OUT"

@@ -32,20 +32,28 @@ final class Highlight {
             "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "TABLE", "JOIN", "ON", "AND", "OR",
             "NOT", "NULL", "INTO", "VALUES", "SET", "ORDER", "BY", "GROUP", "LIMIT", "AS"));
     private static final int MAX = 30_000;
+    private static final Pattern[] PATTERNS = new Pattern[8];
 
     private Highlight() {}
+
+    private static Pattern pattern(boolean slash, boolean hash, boolean dash) {
+        int key = (slash ? 1 : 0) | (hash ? 2 : 0) | (dash ? 4 : 0);
+        Pattern p = PATTERNS[key];
+        if (p != null) return p;
+        StringBuilder re = new StringBuilder("(?<comment>/\\*[\\s\\S]*?(?:\\*/|\\z)");
+        if (slash) re.append("|(?<![:\\w])//[^\\n]*");
+        if (hash) re.append("|(?:^|(?<=\\s))#[^\\n]*");
+        if (dash) re.append("|--[^\\n]*");
+        re.append(")|(?<string>\"[^\"\\\\\\n]*(?:\\\\.[^\"\\\\\\n]*)*\"?|'[^'\\\\\\n]*(?:\\\\.[^'\\\\\\n]*)*'?|`[^`\\\\]*(?:\\\\.[^`\\\\]*)*`?)")
+                .append("|(?<number>\\b\\d[\\d_]*(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b|\\b0[xX][0-9a-fA-F]+\\b)")
+                .append("|(?<word>\\b[A-Za-z_][A-Za-z0-9_]*\\b)");
+        return PATTERNS[key] = Pattern.compile(re.toString(), Pattern.MULTILINE);
+    }
 
     static CharSequence code(Context c, String code, String lang) {
         if (code.isEmpty() || code.length() > MAX) return code;
         String l = lang.toLowerCase(Locale.ROOT);
-        StringBuilder re = new StringBuilder("(?<comment>/\\*[\\s\\S]*?(?:\\*/|\\z)");
-        if (!HASH.contains(l) || l.isEmpty()) re.append("|(?<![:\\w])//[^\\n]*");
-        if (HASH.contains(l)) re.append("|(?:^|(?<=\\s))#[^\\n]*");
-        if (DASH.contains(l)) re.append("|--[^\\n]*");
-        re.append(")|(?<string>\"(?:\\\\.|[^\"\\\\\\n])*\"?|'(?:\\\\.|[^'\\\\\\n])*'?|`(?:\\\\.|[^`\\\\])*`?)")
-                .append("|(?<number>\\b\\d[\\d_]*(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b|\\b0[xX][0-9a-fA-F]+\\b)")
-                .append("|(?<word>\\b[A-Za-z_][A-Za-z0-9_]*\\b)");
-        Matcher m = Pattern.compile(re.toString(), Pattern.MULTILINE).matcher(code);
+        Matcher m = pattern(!HASH.contains(l) || l.isEmpty(), HASH.contains(l), DASH.contains(l)).matcher(code);
         SpannableString s = new SpannableString(code);
         int comment = Ui.color(c, R.color.codeComment), string = Ui.color(c, R.color.codeString),
                 number = Ui.color(c, R.color.codeNumber), keyword = Ui.color(c, R.color.codeKeyword);

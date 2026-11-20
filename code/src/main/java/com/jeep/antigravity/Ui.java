@@ -111,8 +111,9 @@ final class Ui {
     static String base(String path) {
         if (path == null || path.isEmpty()) return "";
         String p = path.replaceAll("/+$", "");
+        if (p.isEmpty()) return "/";
         int i = p.lastIndexOf('/');
-        return i < 0 ? p : p.substring(i + 1).isEmpty() ? "/" : p.substring(i + 1);
+        return i < 0 ? p : p.substring(i + 1);
     }
 
     static String size(long n) {

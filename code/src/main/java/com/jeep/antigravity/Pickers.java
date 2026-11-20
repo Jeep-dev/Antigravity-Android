@@ -68,6 +68,7 @@ final class Pickers extends Part {
     };
 
     String modeName(String mode) {
+        if (mode == null || mode.isEmpty()) mode = "default";
         for (String[] m : MODES) if (m[0].equals(mode)) return m[1];
         return "默认";
     }
@@ -116,18 +117,23 @@ final class Pickers extends Part {
     void folderSheet(String path) {
         String at = path != null ? path : !agent.cwd.isEmpty() ? agent.cwd : agent.defaultCwd;
         bridge.get("/dirs?path=" + Uri.encode(at), (status, d) -> {
+            if (app.isFinishing() || app.isDestroyed()) return;
             if (status != 200) { toast("读取目录失败"); return; }
             String here = d.optString("path");
+            String prefix = here.equals("/") ? "" : here.replaceAll("/+$", "");
             Dialog sheet = sheets.sheet("工作目录", agent.tilde(here));
             LinearLayout card = sheets.card(sheet);
             String parent = d.isNull("parent") ? "" : d.optString("parent");
             if (!parent.isEmpty()) sheets.option(card, R.drawable.ic_up, "上一级", null, false, () -> { sheet.dismiss(); folderSheet(parent); });
+            String err = d.optString("error");
             JSONArray dirs = d.optJSONArray("dirs");
             for (int i = 0; dirs != null && i < dirs.length(); i++) {
                 String name = dirs.optString(i);
-                sheets.option(card, R.drawable.ic_folder, name, null, false, () -> { sheet.dismiss(); folderSheet(here + "/" + name); });
+                sheets.option(card, R.drawable.ic_folder, name, null, false, () -> { sheet.dismiss(); folderSheet(prefix + "/" + name); });
             }
-            if (dirs == null || dirs.length() == 0) {
+            if (!err.isEmpty()) {
+                sheets.empty(card, "无法读取目录：" + err);
+            } else if (dirs == null || dirs.length() == 0) {
                 sheets.empty(card, "没有子目录");
             }
             LinearLayout field = Ui.row(app);
@@ -142,9 +148,11 @@ final class Pickers extends Part {
             field.addView(name, new LinearLayout.LayoutParams(0, dp(40), 1));
             TextView make = sheets.button("新建", false, v -> {
                 String n = name.getText().toString().trim();
-                if (n.isEmpty() || n.contains("/")) { toast("目录名不能为空，也不能带 /"); return; }
-                bridge.post("/mkdir", obj("path", here + "/" + n), (s2, r2) -> {
-                    if (s2 == 200) { sheet.dismiss(); folderSheet(here + "/" + n); } else toast("新建失败");
+                if (n.isEmpty() || n.contains("/") || n.equals(".") || n.equals("..")) { toast("目录名无效"); return; }
+                String created = prefix + "/" + n;
+                bridge.post("/mkdir", obj("path", created), (s2, r2) -> {
+                    if (app.isFinishing() || app.isDestroyed()) return;
+                    if (s2 == 200) { sheet.dismiss(); folderSheet(created); } else toast("新建失败");
                 });
             });
             field.addView(make);
@@ -164,6 +172,7 @@ final class Pickers extends Part {
             use.setBackground(Ui.press(app, Ui.round(col(R.color.text), dp(10)), dp(10)));
             use.setTextColor(col(R.color.bg));
             sheets.actions(sheet, cancel, use);
+            if (sheet.getWindow() != null) sheet.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
             sheet.show();
         });
     }
@@ -306,6 +315,7 @@ final class Pickers extends Part {
     void memorySheet(String scope, String folder, String title) {
         String q = "/memory?scope=" + scope + (folder == null ? "" : "&cwd=" + Uri.encode(folder));
         bridge.get(q, (status, data) -> {
+            if (app.isFinishing() || app.isDestroyed()) return;
             if (status != 200) { toast("读取 AGENTS.md 失败"); return; }
             sheets.textSheet(title, data.optString("text"), "", true, (t, done) -> {
                 JSONObject body = obj("scope", scope, "text", t);

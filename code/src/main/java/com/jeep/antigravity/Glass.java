@@ -55,6 +55,7 @@ final class Glass {
      * it blurred, its tint, a hairline round it.
      */
     static final class Pane extends LinearLayout {
+        private final Host host;
         private final float radius;
         private final int tint, solid, base;
         private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG), fill = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -66,6 +67,7 @@ final class Glass {
         /** radius < 0: a circle. */
         Pane(Context c, Host host, float radius, int base, int tint, int solid, int stroke) {
             super(c);
+            this.host = host;
             this.radius = radius;
             this.base = base;
             this.tint = tint;
@@ -84,12 +86,13 @@ final class Glass {
             bounds.set(0, 0, w, h);
             shape.reset();
             shape.addRoundRect(bounds, r, r, Path.Direction.CW);
-            if (blurs()) {
+            if (blurs() && w > 0 && h > 0) {
                 if (blurred == null) blurred = new android.graphics.RenderNode("glass");
                 android.graphics.RenderNode node = (android.graphics.RenderNode) blurred;
                 node.setPosition(0, 0, w, h);
                 float blur = Ui.dp(getContext(), 26);
                 node.setRenderEffect(android.graphics.RenderEffect.createBlurEffect(blur, blur, android.graphics.Shader.TileMode.CLAMP));
+                if (host.content != null) record((android.graphics.RenderNode) host.content, host);
             }
         }
 
@@ -109,7 +112,9 @@ final class Glass {
             } finally {
                 node.endRecording();
             }
+            boolean was = recorded;
             recorded = true;
+            if (!was) invalidate();
         }
 
         @Override protected void onDraw(Canvas canvas) {

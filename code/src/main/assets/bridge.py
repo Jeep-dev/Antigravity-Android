@@ -28,7 +28,7 @@ import time
 import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 VERSION = 4  # Bridge VERSION in the app: an app update replaces an older running bridge
 HOME = os.path.expanduser('~')
@@ -72,19 +72,31 @@ def read_json(path, default):
         return default
 
 
+state_lock = threading.Lock()
+log_lock = threading.Lock()
+
+
 def write_json(path, data, mode=None):
     """Written aside, then moved in: a write cut short leaves the last one whole."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    part = path + '.tmp'
-    with open(part, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    if mode is not None:
-        os.chmod(part, mode)
-    os.replace(part, path)
+    part = '%s.%d.%s.tmp' % (path, os.getpid(), uuid.uuid4().hex[:8])
+    try:
+        with open(part, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        if mode is not None:
+            os.chmod(part, mode)
+        os.replace(part, path)
+    except Exception:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
 
 
 def safe_id(session_id):
-    return isinstance(session_id, str) and re.fullmatch(r'[\w.-]{1,80}', session_id) is not None
+    return isinstance(session_id, str) and session_id not in ('.', '..') \
+        and not session_id.startswith('.') and re.fullmatch(r'[\w.-]{1,80}', session_id) is not None
 
 
 class Hub:
@@ -294,20 +306,28 @@ def keep_models(models_block):
     if not listed:
         return
     current = models_block.get('currentModelId') or ''
-    saved = read_json(MODELS_FILE, {})
     models = group_models(listed)
-    data = {'models': models, 'current': current or saved.get('current', ''), 'stamp': models_stamp()}
-    if data != saved:
-        try:
-            write_json(MODELS_FILE, data)
-        except OSError:
-            pass
-        if [m['value'] for m in models] != [m.get('value') for m in saved.get('models', [])]:
-            hub.emit('', 'config')
+    changed = False
+    with state_lock:
+        saved = read_json(MODELS_FILE, {})
+        data = {'models': models, 'current': current or saved.get('current', ''), 'stamp': models_stamp()}
+        if data != saved:
+            try:
+                write_json(MODELS_FILE, data)
+            except OSError:
+                pass
+            changed = [m['value'] for m in models] != [m.get('value') for m in saved.get('models', [])]
+    if changed:
+        hub.emit('', 'config')
 
 
 models_lock = threading.Lock()
 models_tried = 0.0  # when agy's models were last asked for and not given
+
+
+def reset_models_tried():
+    global models_tried
+    models_tried = 0.0
 
 
 def find_models():
@@ -328,11 +348,20 @@ def find_models():
         result = agy.request('session/new', {'cwd': DEFAULT_CWD, 'mcpServers': []}, timeout=90) or {}
         sid = result.get('sessionId')
         keep_models(result.get('models'))
-        with agy.lock:
-            early = agy.early.pop(sid, []) if sid else []
-        for u in early:
-            if u.get('sessionUpdate') == 'available_commands_update':
-                remember_commands([c.get('name') for c in u.get('availableCommands') or [] if isinstance(c, dict) and c.get('name')])
+        if sid:
+            # Close first as a round-trip barrier so any available_commands_update emitted right
+            # after session/new has arrived in agy.early before we pop it.
+            try:
+                agy.request('session/close', {'sessionId': sid}, timeout=10)
+            except (AgyError, RpcError):
+                pass
+            with agy.lock:
+                early = agy.early.pop(sid, [])
+            for u in early:
+                if u.get('sessionUpdate') == 'available_commands_update':
+                    remember_commands([c.get('name') for c in u.get('availableCommands') or [] if isinstance(c, dict) and c.get('name')])
+            remove_session_files(sid, remember=False)
+            sid = None
         models = read_json(MODELS_FILE, {}).get('models', [])
         log('models: %d' % len(models))
         if not models:
@@ -347,7 +376,7 @@ def find_models():
                 agy.request('session/close', {'sessionId': sid}, timeout=10)
             except (AgyError, RpcError):
                 pass
-            remove_session_files(sid)
+            remove_session_files(sid, remember=False)
         models_lock.release()
 
 
@@ -393,6 +422,7 @@ class Agy:
         self.info = {}
         self.stderr = []
         self.failures = 0
+        self.failed_gen = -1
         self.retry_at = 0.0
         self.restart_reason = None  # started again once no reply runs
         self.early = {}  # session id -> updates that came before a conversation took the session (session/new's)
@@ -423,11 +453,17 @@ class Agy:
                     'clientCapabilities': {'fs': {'readTextFile': False, 'writeTextFile': False}, 'terminal': False},
                     'clientInfo': {'name': 'antigravity-android', 'version': str(VERSION)}}, timeout=timeout)
             except RpcError as e:
+                if self.proc is proc:
+                    self.stop('initialize refused')
                 raise AgyError('agy 没有接受连接：%s' % e)
             except AgyError:
                 with self.lock:
-                    self.failures += 1
-                    self.retry_at = time.time() + min(300, 5 * 2 ** self.failures)
+                    if self.failed_gen != gen:
+                        self.failed_gen = gen
+                        self.failures += 1
+                        self.retry_at = time.time() + min(300, 5 * 2 ** self.failures)
+                if self.proc is proc:
+                    self.stop('initialize failed')
                 raise
             with self.lock:
                 if self.proc is proc and self.gen == gen:
@@ -440,27 +476,38 @@ class Agy:
     def start(self):
         """Starts a new agy (the caller holds the lock)."""
         args = [agy_path(), 'acp'] + launch.args()
-        self.stderr = []
+        stderr_buf = []
+        self.stderr = stderr_buf
         self.gen += 1
         self.ready = False
-        os.makedirs(DEFAULT_CWD, exist_ok=True)
-        # Binary pipes: records are split on LF only (a text reader would also split on U+2028 inside JSON).
-        self.proc = subprocess.Popen(args, cwd=DEFAULT_CWD, env=agy_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            os.makedirs(DEFAULT_CWD, exist_ok=True)
+            # Binary pipes: records are split on LF only (a text reader would also split on U+2028 inside JSON).
+            self.proc = subprocess.Popen(args, cwd=DEFAULT_CWD, env=agy_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, start_new_session=True)
+        except OSError as e:
+            self.proc = None
+            self.last_error = str(e)[:200]
+            self.failed_gen = self.gen
+            self.failures += 1
+            self.retry_at = time.time() + min(300, 5 * 2 ** self.failures)
+            raise AgyError('agy 启动失败：%s' % e)
         self.args_used = (launch.gen, args)
         self.started_at = time.time()
         self.restart_reason = None
         gen, proc = self.gen, self.proc
-        threading.Thread(target=self.read_out, args=(proc, gen), daemon=True).start()
-        threading.Thread(target=self.read_err, args=(proc,), daemon=True).start()
+        threading.Thread(target=self.read_out, args=(proc, gen, stderr_buf), daemon=True).start()
+        threading.Thread(target=self.read_err, args=(proc, stderr_buf), daemon=True).start()
         log('agy pid %d started: %s' % (proc.pid, ' '.join(shlex.quote(a) for a in args[1:])))
 
-    def read_err(self, proc):
+    def read_err(self, proc, stderr_buf):
         for raw in proc.stderr:
-            self.stderr.append(raw.decode('utf-8', 'replace').rstrip())
-            del self.stderr[:-50]
+            line = raw.decode('utf-8', 'replace').rstrip()
+            with self.lock:
+                stderr_buf.append(line)
+                del stderr_buf[:-50]
 
-    def read_out(self, proc, gen):
+    def read_out(self, proc, gen, stderr_buf):
         for raw in proc.stdout:
             line = raw.decode('utf-8', 'replace').strip()
             if not line:
@@ -477,17 +524,18 @@ class Agy:
                 import traceback
                 log('agy record not understood:\n%s' % traceback.format_exc())
         code = proc.wait()
-        tail = '\n  '.join(self.stderr[-12:])
-        log('agy pid %d exited with %s%s' % (proc.pid, code, ', stderr:\n  ' + tail if tail else ''))
         with self.lock:
+            tail = '\n  '.join(stderr_buf[-12:])
             if self.proc is proc:
                 self.proc = None
                 self.ready = False
-                self.last_error = (self.stderr[-1] if self.stderr else '')[:200]
-                if time.time() - self.started_at < 30:  # ended by itself soon after it started: wait longer each time
+                self.last_error = (stderr_buf[-1] if stderr_buf else '')[:200]
+                if time.time() - self.started_at < 30 and self.failed_gen != gen:
+                    self.failed_gen = gen
                     self.failures += 1
                     self.retry_at = time.time() + min(300, 5 * 2 ** self.failures)
-            waiting = [s for s in self.pending.values() if s.get('gen') == gen]
+            waiting = [self.pending.pop(k) for k in list(self.pending) if self.pending[k].get('gen') == gen]
+        log('agy pid %d exited with %s%s' % (proc.pid, code, ', stderr:\n  ' + tail if tail else ''))
         for slot in waiting:
             slot['error'] = AgyError('agy 退出了（代码 %s）' % code)
             slot['event'].set()
@@ -510,7 +558,8 @@ class Agy:
                         for old in list(self.early)[:-8]:
                             del self.early[old]
         elif 'id' in msg:
-            slot = self.pending.pop(msg['id'], None)
+            with self.lock:
+                slot = self.pending.pop(msg['id'], None)
             if slot is None:
                 return
             if 'error' in msg:
@@ -534,8 +583,8 @@ class Agy:
             # The bridge offers agy nothing of the client's own (files, terminals).
             self.write({'jsonrpc': '2.0', 'id': msg['id'], 'error': {'code': -32601, 'message': 'not supported: %s' % method}})
 
-    def write(self, message):
-        proc = self.proc
+    def write(self, message, proc=None):
+        proc = self.proc if proc is None else proc
         if proc is None or proc.poll() is not None:
             raise AgyError('agy 没在运行')
         data = json.dumps(message, ensure_ascii=False).encode('utf-8') + b'\n'
@@ -543,7 +592,7 @@ class Agy:
             try:
                 proc.stdin.write(data)
                 proc.stdin.flush()
-            except (OSError, ValueError):
+            except (OSError, ValueError, RuntimeError):
                 raise AgyError('agy 没在运行')
 
     def respond(self, rid, result):
@@ -561,14 +610,16 @@ class Agy:
     def call(self, method, params, then=None):
         """Sends a request; its slot, whose event is set when the answer comes (then is run with it)."""
         with self.lock:
+            proc = self.proc
             self.next += 1
             rid = self.next
             slot = {'event': threading.Event(), 'gen': self.gen, 'id': rid, 'then': then}
             self.pending[rid] = slot
         try:
-            self.write({'jsonrpc': '2.0', 'id': rid, 'method': method, 'params': params})
+            self.write({'jsonrpc': '2.0', 'id': rid, 'method': method, 'params': params}, proc=proc)
         except AgyError as e:
-            self.pending.pop(rid, None)
+            with self.lock:
+                self.pending.pop(rid, None)
             slot['error'] = e
             slot['event'].set()
             if then:
@@ -579,7 +630,8 @@ class Agy:
         gen = self.gen
         slot = self.call(method, params)
         if not slot['event'].wait(timeout):
-            self.pending.pop(slot['id'], None)
+            with self.lock:
+                self.pending.pop(slot['id'], None)
             raise AgyError('agy %d 秒没有回应（%s）' % (timeout, method))
         if slot.get('error') is not None:
             raise slot['error']
@@ -587,31 +639,39 @@ class Agy:
             self.primed_gen = gen
         return slot.get('result')
 
+    def busy(self):
+        with self.lock:
+            return bool(self.pending) or self.init_lock.locked()
+
     def stop(self, reason):
         with self.lock:
             proc, self.proc = self.proc, None
             self.ready = False
         if proc is not None:
             log('agy pid %d stopped: %s' % (proc.pid, reason))
-            end(proc)
+            end(proc, self.write_lock)
 
     def restart_when_idle(self, reason):
         """Started again (with new settings, a new sign-in) once no reply runs; at once if none does."""
         if not self.alive():
             return
         self.restart_reason = reason
-        if not any(c.running for c in all_chats()):
+        if not any(c.running for c in all_chats()) and not self.busy():
             self.stop(reason)
 
 
-def end(proc):
+def end(proc, write_lock=None):
     """Ends a process: end of input (it then shuts down in order), then SIGTERM, then SIGKILL;
     returns once it is gone."""
     if proc is None:
         return
     try:
-        proc.stdin.close()
-    except OSError:
+        if write_lock is not None:
+            with write_lock:
+                proc.stdin.close()
+        else:
+            proc.stdin.close()
+    except (OSError, ValueError, RuntimeError):
         pass
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
@@ -621,7 +681,10 @@ def end(proc):
             try:
                 os.killpg(proc.pid, sig)
             except OSError:
-                proc.send_signal(sig)
+                try:
+                    proc.send_signal(sig)
+                except OSError:
+                    pass
     proc.wait()
 
 
@@ -827,6 +890,8 @@ class Chat:
         self.last_out = time.time()
         self.quiet_logged = False
         self.turn = 0
+        self.cancelled_turn = -1
+        self.deleted = False
         self.commands = []
         self.usage = {}  # context window: used, size
         self.totals = {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'thinking': 0}
@@ -846,6 +911,8 @@ class Chat:
     # ---- what agy says ----
 
     def cc(self, msg):
+        if self.deleted or not self.key:
+            return
         msg.setdefault('session_id', self.session_id)
         hub.emit(self.key, 'cc', msg)
 
@@ -854,7 +921,7 @@ class Chat:
         with self.lock:
             self.last_out = time.time()
             if self.quiet_logged:
-                log('chat %s: output again' % self.key[:8])
+                log('chat %s: output again' % (self.key or '-')[:8])
                 self.quiet_logged = False
             kind = u.get('sessionUpdate')
             if kind == 'usage_update':
@@ -870,13 +937,13 @@ class Chat:
             if kind == 'session_info_update' and u.get('title'):
                 self.title = u['title']
                 if self.session_id and self.session_id not in read_json(TITLES_FILE, {}):
-                    hub.emit(self.key, 'title', {'session_id': self.session_id, 'title': u['title']})
+                    hub.emit(self.key or '', 'title', {'session_id': self.session_id, 'title': u['title']})
                 return
             if self.transcript is None:
                 self.transcript = Transcript()
             if kind == 'agent_message_chunk' and is_error_text(text_of(u.get('content'))) and not self.replaying:
                 self.last_error = error_text(text_of(u.get('content')))
-                log('chat %s: agy says: %s' % (self.key[:8], self.last_error[:300]))
+                log('chat %s: agy says: %s' % ((self.key or '-')[:8], self.last_error[:300]))
                 return  # told as the turn's error when it ends
             self.first_output(kind)
             self.transcript.apply(u)
@@ -913,12 +980,19 @@ class Chat:
 
     def close_block(self):
         if self.open is not None:
+            prev = self.open
             self.cc({'type': 'stream_event', 'event': {'type': 'content_block_stop', 'index': self.index}})
             self.open = None
             if self.transcript and self.transcript.messages:
                 last = self.transcript.messages[-1]
-                if last.get('blocks'):
-                    last['blocks'][-1]['closed'] = True
+                blocks = last.get('blocks')
+                if blocks:
+                    # transcript.apply() already ran for the incoming chunk, so the block being
+                    # closed may now be blocks[-2] if a new block of another type was just appended.
+                    if blocks[-1].get('type') == prev:
+                        blocks[-1]['closed'] = True
+                    elif len(blocks) >= 2 and blocks[-2].get('type') == prev:
+                        blocks[-2]['closed'] = True
 
     def translate(self, u):
         kind = u.get('sessionUpdate')
@@ -1030,8 +1104,10 @@ class Chat:
             was_running = self.running
             self.running = False
             self.prompts = []
+            self.inserted = {}
+            self.abandoned.clear()
             self.perms = {}
-        if was_running:
+        if was_running and not self.deleted and self.key:
             hub.emit(self.key, 'exit', {'code': code, 'running': True, 'stderr': stderr})
 
     # ---- what is said to agy ----
@@ -1041,10 +1117,10 @@ class Chat:
         model with what it does next. The work is done in a thread of its own: starting agy and
         loading the session may take longer than the app waits for an answer."""
         with self.lock:
-            inserting = self.running and self.loaded == agy.gen and agy.alive()
+            inserting = self.running and bool(self.prompts) and self.loaded == agy.gen and agy.alive()
             if session_id and not self.session_id:
                 self.session_id = session_id
-            if cwd and not self.session_id:
+            if cwd and self.loaded is None:
                 self.cwd = cwd
             self.model, self.effort, self.mode = model, effort, mode
             text, images = '', []
@@ -1056,12 +1132,13 @@ class Chat:
                 elif b.get('type') == 'image':
                     src = b.get('source') or {}
                     images.append((src.get('media_type') or 'image/png', src.get('data', '')))
-            self.turn += 1
             self.used = self.last_out = time.time()
             if not inserting:
+                self.turn += 1
                 self.running = True
                 self.last_error = ''
                 self.timing = {'sent': time.time()}
+                self.turn_start = len(self.transcript.messages) if self.transcript is not None else 0
             turn = self.turn
         hub.emit(self.key, 'state', {'running': True})
         threading.Thread(target=self.deliver, args=(text, images, inserting, message_uuid, turn), daemon=True).start()
@@ -1076,18 +1153,33 @@ class Chat:
             name = re.match(r'^/(?:name|rename)\s+(\S[\s\S]*)$', text.strip()) if not images else None
             if name:  # /name: the app's own name for it, not a message to the model
                 with self.lock:
+                    if self.turn != turn or self.deleted or self.cancelled_turn == turn:
+                        if self.cancelled_turn == turn and self.running:
+                            self.finish({'type': 'result', 'subtype': 'error_during_execution', 'is_error': False})
+                        return
                     self.begin_turn()
                 set_title(self.session_id, name.group(1))
                 keep_title(self.key, self.session_id, ' '.join(name.group(1).split())[:200])
                 self.finish({'type': 'result', 'subtype': 'success', 'is_error': False})
                 return
             with self.lock:
-                if self.turn != turn:
+                if self.turn != turn or self.deleted:
                     return
-                self.begin_turn()
+                if self.cancelled_turn == turn:
+                    cancelled = True
+                else:
+                    cancelled = False
+                    self.begin_turn()
+            if cancelled:
+                self.finish({'type': 'result', 'subtype': 'error_during_execution', 'is_error': False})
+                return
             self.prompt(text, images, None)
-        except (AgyError, RpcError) as e:
-            log('chat %s: message not sent: %s' % (self.key[:8], e))
+        except Exception as e:
+            if not isinstance(e, (AgyError, RpcError)):
+                import traceback
+                log('chat %s: unexpected error in deliver:\n%s' % ((self.key or '-')[:8], traceback.format_exc()))
+            else:
+                log('chat %s: message not sent: %s' % ((self.key or '-')[:8], e))
             if inserting:
                 self.cc({'type': 'command_lifecycle', 'command_uuid': message_uuid, 'state': 'failed'})
                 return
@@ -1167,6 +1259,10 @@ class Chat:
     def load(self):
         """Loads the session into the running agy (the caller holds self.setup, not self.lock): agy
         tells it again from the start, which is kept as its transcript."""
+        if self.cwd == DEFAULT_CWD:
+            row_cwd = (session_row(self.session_id) or {}).get('cwd')
+            if row_cwd and os.path.isdir(row_cwd):
+                self.cwd = row_cwd
         cwd = self.cwd if os.path.isdir(self.cwd) else DEFAULT_CWD
         with self.lock:
             self.replaying = True
@@ -1184,6 +1280,11 @@ class Chat:
             self.loaded = agy.gen
             self.took(result)
             add_images(self.session_id, self.transcript)
+            self.user_messages = self.transcript.users()
+            self.tool_calls = sum(
+                1 for m in self.transcript.messages if m.get('role') == 'assistant'
+                for b in m.get('blocks') or [] if b.get('type') == 'tool'
+            )
             view = self.transcript.view()
         save_history(self.session_id, view, self.cwd)
         log('chat %s: session %s loaded (%d messages)' % ((self.key or '-')[:8], self.session_id, len(view)))
@@ -1195,27 +1296,31 @@ class Chat:
         if text:
             blocks.append({'type': 'text', 'text': text})
         with self.lock:
+            if message_uuid is not None and not self.running:
+                self.cc({'type': 'command_lifecycle', 'command_uuid': message_uuid, 'state': 'failed'})
+                return
             if self.transcript is None:
                 self.transcript = Transcript()
-            refs = keep_images(self.session_id, self.transcript.users(), images)
             if message_uuid is None:
+                refs = keep_images(self.session_id, self.transcript.users(), images)
                 self.close_block()
                 self.transcript.user(text, refs)
                 self.turn_start = len(self.transcript.messages)
                 self.user_messages += 1
-            if message_uuid is None:
                 self.mark('prompted')
             slot = agy.call('session/prompt', {'sessionId': self.session_id, 'prompt': blocks}, then=self.answered)
             self.prompts.append(slot['id'])
             if message_uuid is not None:
-                self.inserted[slot['id']] = [message_uuid, text, refs]
-        log('chat %s: message %s (%d image)' % (self.key[:8], 'inserted' if message_uuid else 'sent', len(images)))
+                self.inserted[slot['id']] = [message_uuid, text, list(images)]
+        log('chat %s: message %s (%d image)' % ((self.key or '-')[:8], 'inserted' if message_uuid else 'sent', len(images)))
 
     def answered(self, slot):
         """agy answered a prompt: the turn ended, or the prompt was ended by a later one (a message
         inserted while it ran: from now on that one's) and the turn goes on."""
         with self.lock:
             rid = slot['id']
+            if self.deleted:
+                return
             if rid in self.abandoned:
                 self.abandoned.discard(rid)
                 return
@@ -1223,18 +1328,24 @@ class Chat:
                 return
             later = self.prompts[self.prompts.index(rid) + 1:]
             self.prompts.remove(rid)
+            error, result = slot.get('error'), slot.get('result') or {}
+            self.count_locked(result.get('usage'))
             if later:
                 # The message after it is the model's now: shown as one of the conversation's.
                 nxt = self.inserted.pop(later[0], None)
                 if nxt:
-                    message_uuid, text, refs = nxt
+                    message_uuid, text, imgs = nxt
+                    refs = keep_images(self.session_id, self.transcript.users(), imgs)
                     self.close_block()
                     self.transcript.user(text, refs)
                     self.user_messages += 1
                     self.cc({'type': 'command_lifecycle', 'command_uuid': message_uuid, 'state': 'started'})
                 return
-            error, result = slot.get('error'), slot.get('result') or {}
-        self.count(result.get('usage'))
+            # An inserted prompt that failed while the parent prompt is still running must not end the turn.
+            ins = self.inserted.pop(rid, None)
+            if ins is not None and (self.prompts or not self.running):
+                self.cc({'type': 'command_lifecycle', 'command_uuid': ins[0], 'state': 'failed'})
+                return
         if error is not None:
             outcome = {'type': 'result', 'subtype': 'error', 'is_error': True, 'result': friendly(str(error))}
         elif result.get('stopReason') == 'cancelled':
@@ -1248,11 +1359,15 @@ class Chat:
             outcome = {'type': 'result', 'subtype': 'error', 'is_error': True, 'result': '模型拒绝了这个请求'}
         else:
             outcome = {'type': 'result', 'subtype': 'success', 'is_error': False}
-        log('chat %s: turn ended (%s%s)' % (self.key[:8], result.get('stopReason') or outcome['subtype'],
+        log('chat %s: turn ended (%s%s)' % ((self.key or '-')[:8], result.get('stopReason') or outcome['subtype'],
                                             ': %s' % error if error else ''))
         self.finish(outcome)
 
     def count(self, usage):
+        with self.lock:
+            self.count_locked(usage)
+
+    def count_locked(self, usage):
         if not isinstance(usage, dict):
             return
         for key, theirs in (('input', 'inputTokens'), ('output', 'outputTokens'), ('cacheRead', 'cachedReadTokens'),
@@ -1262,19 +1377,36 @@ class Chat:
     def finish(self, result):
         """The turn is over: the app is told, what is still asked is dropped, the transcript kept."""
         self.drop_questions()
+        snap = None
         with self.lock:
             self.close_block()
-            for rid, (message_uuid, text, refs) in list(self.inserted.items()):
+            for rid, (message_uuid, text, imgs) in list(self.inserted.items()):
                 self.cc({'type': 'command_lifecycle', 'command_uuid': message_uuid, 'state': 'discarded'})
             self.inserted = {}
             self.prompts = []
             self.running = False
             self.used = time.time()
-            self.cc(result)
-            if self.session_id and self.transcript is not None:
-                save_history(self.session_id, self.transcript.view(), self.cwd)
-        if agy.restart_reason and not any(c.running for c in all_chats()):
+            if not self.deleted:
+                self.cc(result)
+                if self.session_id and self.transcript is not None:
+                    snap = (self.session_id, self.transcript.view(), self.cwd)
+        if snap is not None:
+            save_history(*snap)
+        if agy.restart_reason and not any(c.running for c in all_chats()) and not agy.busy():
             agy.stop(agy.restart_reason)
+
+    def abort(self):
+        """Stops and marks this conversation deleted so late callbacks never recreate its history."""
+        with self.lock:
+            self.deleted = True
+            self.running = False
+            self.prompts = []
+            self.inserted = {}
+            self.abandoned.clear()
+            sid = self.session_id
+        self.drop_questions()
+        if sid:
+            agy.notify('session/cancel', {'sessionId': sid})
 
     def cancel(self, message_uuid):
         """A message inserted while a reply ran is given to the model at once: it cannot be taken back."""
@@ -1288,7 +1420,8 @@ class Chat:
             if not self.running:
                 return False
             turn, prompts = self.turn, list(self.prompts)
-            log('chat %s: stop requested' % self.key[:8])
+            self.cancelled_turn = turn
+            log('chat %s: stop requested' % (self.key or '-')[:8])
         self.drop_questions()
         if self.session_id:
             agy.notify('session/cancel', {'sessionId': self.session_id})
@@ -1296,24 +1429,27 @@ class Chat:
         def force():
             time.sleep(10)
             with self.lock:
-                if not self.running or self.turn != turn:
+                if not self.running or self.deleted or self.turn != turn:
                     return
                 self.abandoned.update(prompts)
                 self.abandoned.update(self.prompts)
-                log('chat %s: not stopped 10 s after cancel: ended here' % self.key[:8])
+                log('chat %s: not stopped 10 s after cancel: ended here' % (self.key or '-')[:8])
             self.finish({'type': 'result', 'subtype': 'error_during_execution', 'is_error': False})
         threading.Thread(target=force, daemon=True).start()
         return True
 
     def context_usage(self):
-        if not self.usage and not any(self.totals.values()):
-            return None
-        used, size = self.usage.get('used') or 0, self.usage.get('size') or 0
-        return {'categories': [{'name': 'Messages', 'tokens': used, 'deferred': False}],
-                'totalTokens': used, 'maxTokens': size, 'percentage': round(100.0 * used / size, 1) if size else 0,
-                'model': self.agy_model or self.model or '',
-                'stats': {'tokens': dict(self.totals), 'cost': 0, 'userMessages': self.user_messages,
-                          'assistantMessages': self.user_messages, 'toolCalls': self.tool_calls}}
+        with self.lock:
+            if not self.usage and not any(self.totals.values()):
+                return None
+            used, size = self.usage.get('used') or 0, self.usage.get('size') or 0
+            assistant = sum(1 for m in self.transcript.messages if m.get('role') == 'assistant' and m.get('blocks')) \
+                if self.transcript is not None else self.user_messages
+            return {'categories': [{'name': 'Messages', 'tokens': used, 'deferred': False}],
+                    'totalTokens': used, 'maxTokens': size, 'percentage': round(100.0 * used / size, 1) if size else 0,
+                    'model': self.agy_model or self.model or '',
+                    'stats': {'tokens': dict(self.totals), 'cost': 0, 'userMessages': self.user_messages,
+                              'assistantMessages': assistant, 'toolCalls': self.tool_calls}}
 
 
 chats = {}  # the app's key -> Chat
@@ -1403,11 +1539,15 @@ def reaper():
             if chat.running and not chat.quiet_logged and time.time() - chat.last_out > 60:
                 chat.quiet_logged = True
                 log('chat %s: no output from agy for 60s' % chat.key[:8])
-        if not any(c.running for c in live):
+        if not any(c.running for c in live) and not agy.busy():
             if agy.restart_reason:
                 agy.stop(agy.restart_reason)
             elif agy.alive() and time.time() - agy.used > IDLE_STOP:
                 agy.stop('unused for %d minutes' % (IDLE_STOP // 60))
+        with chats_lock:
+            cutoff = time.time() - IDLE_STOP
+            for sid in [sid for sid, c in loose.items() if not c.running and c.used < cutoff]:
+                loose.pop(sid, None)
 
 
 def warm():
@@ -1437,19 +1577,24 @@ def prime():
             return
         os.makedirs(DEFAULT_CWD, exist_ok=True)
         began = time.time()
-        sid = (agy.request('session/new', {'cwd': DEFAULT_CWD, 'mcpServers': []}, timeout=90) or {}).get('sessionId')
+        result = agy.request('session/new', {'cwd': DEFAULT_CWD, 'mcpServers': []}, timeout=90) or {}
+        sid = result.get('sessionId')
+        keep_models(result.get('models'))
         log('agy primed: its first session took %.1fs' % (time.time() - began))
     except (AgyError, RpcError, OSError) as e:
         log('agy not primed: %s' % e)
     finally:
         if sid:
-            with agy.lock:
-                agy.early.pop(sid, None)
             try:
                 agy.request('session/close', {'sessionId': sid}, timeout=10)
             except (AgyError, RpcError):
                 pass
-            remove_session_files(sid)
+            with agy.lock:
+                early = agy.early.pop(sid, [])
+            for u in early:
+                if u.get('sessionUpdate') == 'available_commands_update':
+                    remember_commands([c.get('name') for c in u.get('availableCommands') or [] if isinstance(c, dict) and c.get('name')])
+            remove_session_files(sid, remember=False)
         models_lock.release()
 
 
@@ -1470,7 +1615,7 @@ def parse_time(text):
 
 
 def uri_path(uri):
-    return uri[7:] if isinstance(uri, str) and uri.startswith('file://') else (uri or '')
+    return unquote(uri[7:]) if isinstance(uri, str) and uri.startswith('file://') else (uri or '')
 
 
 def one_line(text, limit=SHORT_TITLE):
@@ -1584,10 +1729,10 @@ def add_images(session_id, transcript):
         refs = []
         for name in files:
             parts = name.split('.')[0].split('-')
-            if len(parts) == 2 and parts[0] == str(n):
-                refs.append('ccimg:%s:%s:%s' % (session_id, parts[0], parts[1]))
+            if len(parts) == 2 and parts[0] == str(n) and parts[1].isdigit():
+                refs.append((int(parts[1]), 'ccimg:%s:%s:%s' % (session_id, parts[0], parts[1])))
         if refs:
-            m['images'] = refs
+            m['images'] = [ref for _, ref in sorted(refs)]
         n += 1
 
 
@@ -1627,7 +1772,12 @@ def load_history(session_id):
         return None
     if chat is None:
         with chats_lock:
-            chat = loose.setdefault(session_id, Chat(None, session_id))
+            for c in chats.values():
+                if c.session_id == session_id:
+                    chat = c
+                    break
+            if chat is None:
+                chat = loose.setdefault(session_id, Chat(None, session_id))
     try:
         agy.ensure()
         with chat.setup:
@@ -1666,9 +1816,10 @@ def search_sessions(query):
 
 
 def set_title(session_id, title):
-    titles = read_json(TITLES_FILE, {})
-    titles[session_id] = ' '.join(title.split())[:200]
-    write_json(TITLES_FILE, titles)
+    with state_lock:
+        titles = read_json(TITLES_FILE, {})
+        titles[session_id] = ' '.join(title.split())[:200]
+        write_json(TITLES_FILE, titles)
 
 
 def keep_title(key, session_id, title):
@@ -1685,8 +1836,7 @@ def delete_session(session_id):
         if session_id in loose:
             gone.append(loose.pop(session_id))
     for chat in gone:
-        if chat.running:
-            chat.stop()
+        chat.abort()
         if chat.loaded == agy.gen and agy.alive():
             try:
                 agy.request('session/close', {'sessionId': session_id}, timeout=10)
@@ -1697,21 +1847,24 @@ def delete_session(session_id):
     return found or bool(gone)
 
 
-def remove_session_files(session_id):
+def remove_session_files(session_id, remember=True):
     """A session's line in agy's list, its files and what is kept here of it, taken out (and it
     remembered as deleted, should agy list it again)."""
-    hidden = read_json(HIDDEN_FILE, [])
-    if session_id not in hidden:
-        write_json(HIDDEN_FILE, (hidden + [session_id])[-2000:])
-    try:
-        db = sqlite3.connect(SUMMARIES_DB, timeout=5)
+    if remember:
+        with state_lock:
+            hidden = read_json(HIDDEN_FILE, [])
+            if session_id not in hidden:
+                write_json(HIDDEN_FILE, (hidden + [session_id])[-2000:])
+    if os.path.exists(SUMMARIES_DB):
         try:
-            db.execute('DELETE FROM conversation_summaries WHERE conversation_id = ?', (session_id,))
-            db.commit()
-        finally:
-            db.close()
-    except sqlite3.Error as e:
-        log('session %s still in agy\'s list: %s' % (session_id, e))
+            db = sqlite3.connect(SUMMARIES_DB, timeout=5)
+            try:
+                db.execute('DELETE FROM conversation_summaries WHERE conversation_id = ?', (session_id,))
+                db.commit()
+            finally:
+                db.close()
+        except sqlite3.Error as e:
+            log('session %s still in agy\'s list: %s' % (session_id, e))
     for suffix in ('.db', '.db-wal', '.db-shm', '.pb'):
         try:
             os.remove(os.path.join(AGY_DIR, 'conversations', session_id + suffix))
@@ -1733,14 +1886,19 @@ def delete_all():
         chats.clear()
         loose.clear()
     for chat in gone:
-        if chat.running:
-            chat.stop()
+        chat.abort()
     agy.stop('deleting every conversation')
     for folder in ('conversations', 'brain'):
         path = os.path.join(AGY_DIR, folder)
         for name in os.listdir(path) if os.path.isdir(path) else []:
             target = os.path.join(path, name)
-            shutil.rmtree(target, ignore_errors=True) if os.path.isdir(target) else os.remove(target)
+            if os.path.isdir(target) and not os.path.islink(target):
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                try:
+                    os.remove(target)
+                except OSError:
+                    pass
     for suffix in ('', '-wal', '-shm'):
         try:
             os.remove(SUMMARIES_DB + suffix)
@@ -1891,21 +2049,31 @@ def read_config():
 def set_api_key(key):
     """Signs agy in with a Gemini API key (or, with none, takes it out): kept readable by this app
     alone, given to agy as GEMINI_API_KEY, and agy's modelProvider set to gemini."""
-    settings = agy_settings()
-    if key:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        fd = os.open(KEY_FILE + '.tmp', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, 'w') as f:
-            f.write(key)
-        os.replace(KEY_FILE + '.tmp', KEY_FILE)
-        settings['modelProvider'] = 'gemini'
-    else:
-        try:
-            os.remove(KEY_FILE)
-        except OSError:
-            pass
-        settings.pop('modelProvider', None)
-    write_json(AGY_SETTINGS, settings)
+    with state_lock:
+        settings = agy_settings()
+        if key:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            part = '%s.%d.%s.tmp' % (KEY_FILE, os.getpid(), uuid.uuid4().hex[:8])
+            fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                with os.fdopen(fd, 'w') as f:
+                    f.write(key)
+                os.replace(part, KEY_FILE)
+            except Exception:
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+                raise
+            settings['modelProvider'] = 'gemini'
+        else:
+            try:
+                os.remove(KEY_FILE)
+            except OSError:
+                pass
+            settings.pop('modelProvider', None)
+        write_json(AGY_SETTINGS, settings)
+    reset_models_tried()
     agy.restart_when_idle('sign-in changed')
 
 
@@ -1915,45 +2083,51 @@ class Login:
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.pid = None
-        self.fd = None
-        self.out = b''
-        self.done = None  # None while it runs; then (ok, text)
+        self.attempt = None  # dict: {'proc', 'fd', 'out', 'done'}
 
     def start(self):
         import pty
         with self.lock:
-            self.cancel()
+            self._cancel_locked()
             if not os.path.exists(agy_path()):
                 raise AgyError('agy 还没装好')
             env = agy_env()
             env['TERM'] = 'dumb'
             env.pop('DISPLAY', None)
-            pid, fd = pty.fork()
-            if pid == 0:
-                try:
-                    os.chdir(HOME)
-                    os.execve(agy_path(), [agy_path(), 'acp', '--login'], env)
-                finally:
-                    os._exit(127)
-            self.pid, self.fd, self.out, self.done = pid, fd, b'', None
-            threading.Thread(target=self.read, args=(pid, fd), daemon=True).start()
+            master, slave = pty.openpty()
+            try:
+                proc = subprocess.Popen(
+                    [agy_path(), 'acp', '--login'],
+                    cwd=HOME, env=env, stdin=slave, stdout=slave, stderr=slave,
+                    start_new_session=True, close_fds=True,
+                )
+            except OSError as e:
+                os.close(master)
+                os.close(slave)
+                raise AgyError('没能启动登录进程：%s' % e)
+            os.close(slave)
+            att = {'proc': proc, 'fd': master, 'out': b'', 'done': None}
+            self.attempt = att
+            threading.Thread(target=self.read, args=(att,), daemon=True).start()
         deadline = time.time() + 25  # the app waits 30 s for an answer
         while time.time() < deadline:
-            text = self.text()
+            text = self._text(att)
             m = re.search(r'https://accounts\.google\.com/\S+', text)
             if m:
                 return m.group(0)
-            if self.done is not None:
+            if att['done'] is not None:
                 raise AgyError('agy 没有给出登录链接：%s' % text.strip()[-300:])
             time.sleep(0.2)
-        self.cancel()
+        self.cancel(att)
         raise AgyError('agy 25 秒没有给出登录链接')
 
-    def text(self):
-        return re.sub(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\r', '', self.out.decode('utf-8', 'replace'))
+    def _text(self, att):
+        with self.lock:
+            raw = att['out']
+        return re.sub(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\r', '', raw.decode('utf-8', 'replace'))
 
-    def read(self, pid, fd):
+    def read(self, att):
+        proc, fd = att['proc'], att['fd']
         while True:
             try:
                 ready, _, _ = select.select([fd], [], [], 1)
@@ -1961,48 +2135,55 @@ class Login:
                     data = os.read(fd, 65536)
                     if not data:
                         break
-                    self.out += data
+                    with self.lock:
+                        att['out'] += data
             except OSError:
                 break
-            done, _ = os.waitpid(pid, os.WNOHANG)
-            if done:
+            if proc.poll() is not None:
                 try:
                     while select.select([fd], [], [], 0.2)[0]:
                         data = os.read(fd, 65536)
                         if not data:
                             break
-                        self.out += data
+                        with self.lock:
+                            att['out'] += data
                 except OSError:
                     pass
                 break
-        try:
-            _, status = os.waitpid(pid, 0)
-        except ChildProcessError:
-            status = 0  # already reaped above
-        text = self.text()
+        status = proc.wait()
+        text = self._text(att)
         m = re.search(r'Logged in as (\S+?)\.?\s*$', text, re.M)
         last = [line.strip() for line in text.split('press Enter:')[-1].splitlines() if line.strip()]
-        self.done = (bool(m), m.group(1) if m else (last[-1] if last else 'agy 退出了（%s）' % status)[-300:])
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        done = (bool(m), m.group(1) if m else (last[-1] if last else 'agy 退出了（%s）' % status)[-300:])
+        with self.lock:
+            att['done'] = done
+            if att['fd'] is not None:
+                try:
+                    os.close(att['fd'])
+                except OSError:
+                    pass
+                att['fd'] = None
 
     def code(self, code):
         """Gives agy the code (or the page's address); (ok, the account or what went wrong)."""
         with self.lock:
-            if self.fd is None or self.done is not None:
+            att = self.attempt
+            if att is None or att['fd'] is None or att['done'] is not None:
                 return False, '登录已经结束了，请重新开始'
-            os.write(self.fd, code.strip().encode('utf-8') + b'\r')
+            try:
+                os.write(att['fd'], code.strip().encode('utf-8') + b'\r')
+            except OSError:
+                return False, '登录已经结束了，请重新开始'
         deadline = time.time() + 25
-        while self.done is None and time.time() < deadline:
+        while att['done'] is None and time.time() < deadline:
             time.sleep(0.2)
-        if self.done is None:
-            self.cancel()
+        if att['done'] is None:
+            self.cancel(att)
             return False, 'agy 25 秒没有回应，请重新开始'
-        ok, text = self.done
+        ok, text = att['done']
         if ok:
             write_json(ACCOUNT_FILE, {'email': text})
+            reset_models_tried()
             log('signed in as %s' % text)
             agy.restart_when_idle('signed in')
             threading.Thread(target=find_models, daemon=True).start()
@@ -2011,12 +2192,19 @@ class Login:
             log('sign-in failed: %s' % text)
         return ok, text
 
-    def cancel(self):
-        if self.pid and self.done is None:
+    def _cancel_locked(self, target=None):
+        att = target if target is not None else self.attempt
+        if att is not None and att['done'] is None:
             try:
-                os.kill(self.pid, signal.SIGKILL)
+                att['proc'].kill()
             except OSError:
                 pass
+        if target is None or self.attempt is target:
+            self.attempt = None
+
+    def cancel(self, target=None):
+        with self.lock:
+            self._cancel_locked(target)
 
 
 login = Login()
@@ -2042,14 +2230,14 @@ def logout():
 
 
 def list_dirs(path):
-    path = os.path.expanduser(path or HOME)
+    path = os.path.normpath(os.path.expanduser(path or HOME))
     names = []
     try:
         for name in sorted(os.listdir(path), key=str.lower):
             if not name.startswith('.') and os.path.isdir(os.path.join(path, name)):
                 names.append(name)
     except OSError as e:
-        return {'path': path, 'parent': os.path.dirname(path), 'dirs': [], 'error': str(e)}
+        return {'path': path, 'parent': os.path.dirname(path) if path != '/' else None, 'dirs': [], 'error': str(e)}
     return {'path': path, 'parent': os.path.dirname(path) if path != '/' else None, 'dirs': names, 'home': HOME}
 
 
@@ -2073,7 +2261,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def body(self):
         n = int(self.headers.get('Content-Length') or 0)
-        return json.loads(self.rfile.read(n) or b'{}') if n else {}
+        if n < 0:
+            raise ValueError('negative Content-Length')
+        parsed = json.loads(self.rfile.read(n) or b'{}') if n else {}
+        if not isinstance(parsed, dict):
+            raise ValueError('expected JSON object')
+        return parsed
 
     def logged(self, method, run):
         """Runs a request and logs it (not health checks), with its status and time."""
@@ -2286,14 +2479,25 @@ class Handler(BaseHTTPRequestHandler):
         q = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
         folder = os.path.expanduser(q.get('cwd') or DEFAULT_CWD)
         name = os.path.basename(str(q.get('name') or 'file')).strip() or 'file'
-        left = int(self.headers.get('Content-Length') or 0)
-        os.makedirs(folder, exist_ok=True)
-        stem, ext = os.path.splitext(name)
-        target, n = os.path.join(folder, name), 1
-        while os.path.exists(target):
-            target, n = os.path.join(folder, '%s (%d)%s' % (stem, n, ext)), n + 1
         try:
-            with open(target, 'wb') as f:
+            left = int(self.headers.get('Content-Length') or 0)
+            if left < 0:
+                raise ValueError('negative Content-Length')
+        except ValueError as e:
+            return self.reply(400, {'error': str(e)})
+        created = None
+        try:
+            os.makedirs(folder, exist_ok=True)
+            stem, ext = os.path.splitext(name)
+            target, n = os.path.join(folder, name), 1
+            while True:
+                try:
+                    f = open(target, 'xb')
+                    created = target
+                    break
+                except FileExistsError:
+                    target, n = os.path.join(folder, '%s (%d)%s' % (stem, n, ext)), n + 1
+            with f:
                 while left > 0:
                     chunk = self.rfile.read(min(left, 1 << 16))
                     if not chunk:
@@ -2301,10 +2505,11 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(chunk)
                     left -= len(chunk)
         except OSError as e:
-            try:
-                os.remove(target)
-            except OSError:
-                pass
+            if created is not None:
+                try:
+                    os.remove(created)
+                except OSError:
+                    pass
             return self.reply(400, {'error': str(e)})
         self.reply(200, {'ok': True, 'path': target})
 
@@ -2337,6 +2542,8 @@ class Handler(BaseHTTPRequestHandler):
                 batch = hub.after(since, 5)  # a ping at least every 5 s: the app can tell a live bridge
                 if not batch:
                     self.wfile.write(b': ping\n\n')
+                elif batch[0]['seq'] > since + 1:
+                    send({'seq': batch[0]['seq'] - 1, 'chat': '', 'kind': 'gap', 'data': None})
                 for e in batch:
                     since = e['seq']
                     send(e)
@@ -2422,22 +2629,25 @@ def replace_running_bridge():
                 os.kill(old, 0)
         except OSError:
             pass
-    with open(PID_FILE, 'w') as f:
+    part = '%s.%d.tmp' % (PID_FILE, os.getpid())
+    with open(part, 'w') as f:
         f.write(str(os.getpid()))
+    os.replace(part, PID_FILE)
 
 
 def log(text):
-    try:
-        if os.path.getsize(LOG_FILE) > 200_000:
-            os.replace(LOG_FILE, LOG_FILE + '.1')
-    except OSError:
-        pass
-    try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(LOG_FILE, 'a') as f:
-            f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + text + '\n')
-    except OSError:
-        pass
+    with log_lock:
+        try:
+            if os.path.getsize(LOG_FILE) > 200_000:
+                os.replace(LOG_FILE, LOG_FILE + '.1')
+        except OSError:
+            pass
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with open(LOG_FILE, 'a') as f:
+                f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + text + '\n')
+        except OSError:
+            pass
 
 
 def main():
@@ -2450,20 +2660,22 @@ def main():
     os.makedirs(DEFAULT_CWD, exist_ok=True)
 
     def shutdown(signum, _frame):
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        log('stop pid %d: signal %d' % (os.getpid(), signum))
-        login.cancel()
-        proc = agy.proc
-        if proc is not None:
-            try:
-                proc.stdin.close()
-                proc.wait(3)
-            except (OSError, subprocess.TimeoutExpired):
+        try:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            log('stop pid %d: signal %d' % (os.getpid(), signum))
+            login.cancel()
+            proc = agy.proc
+            if proc is not None:
                 try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except OSError:
-                    pass
-        os._exit(0)
+                    proc.stdin.close()
+                    proc.wait(3)
+                except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+        finally:
+            os._exit(0)
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGHUP, signal.SIG_IGN)

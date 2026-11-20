@@ -44,8 +44,24 @@ final class SheetBox extends LinearLayout {
                     return true;
                 }
                 return false;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                releaseVelocity();
+                return false;
             default:
                 return false;
+        }
+    }
+
+    @Override protected void onDetachedFromWindow() {
+        releaseVelocity();
+        super.onDetachedFromWindow();
+    }
+
+    private void releaseVelocity() {
+        if (velocity != null) {
+            velocity.recycle();
+            velocity = null;
         }
     }
 
@@ -79,7 +95,7 @@ final class SheetBox extends LinearLayout {
                 if (!dragging) return true;
                 dragging = false;
                 float fast = getResources().getDisplayMetrics().density * 900;
-                if (getTranslationY() > getHeight() / 3f || speed > fast) {
+                if (e.getActionMasked() == MotionEvent.ACTION_UP && (getTranslationY() > getHeight() / 3f || speed > fast)) {
                     if (close != null) close.run();
                 } else {
                     animate().translationY(0).setDuration(250).setInterpolator(Motion.EMPHASIZED).start();

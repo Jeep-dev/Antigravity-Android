@@ -23,24 +23,44 @@ import io.noties.markwon.core.CorePlugin;
  * (0.4.125, 776564b). Here a host is ASCII only, an address stops at 。，（）, and nothing is a phone.
  */
 final class Links extends AbstractMarkwonPlugin {
+    private static final io.noties.markwon.Prop<Integer> IN_LINK = io.noties.markwon.Prop.of("links-in-link");
     /** What ends an address: spaces, quotes, and CJK punctuation and full-width forms. */
     private static final String REST = "[^\\s<>\"'`\\u3000-\\u303F\\uFF00-\\uFFEF]*";
     private static final Pattern URL = Pattern.compile(
-            "(?:https?://[A-Za-z0-9.-]+(?::\\d+)?"
-                    // without http:// only a known ending: Md.java, build.sh are files
+            "(?:https?://[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*(?::\\d+)?"
+                    // without http:// only a known ending: Md.java, build.sh, java.io.File are code/files
                     + "|(?<![A-Za-z0-9.@/_-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\\.)+"
                     + "(?:com|net|org|io|gg|cn|dev|app|ai|co|me|tv|info|xyz|edu|gov|jp|kr|uk|de|fr|ru|us|top|site|link|cc|hk|tw)"
-                    + "(?![A-Za-z0-9-]))"
-                    + "(?:[/?#]" + REST + ")?");
+                    + "(?![A-Za-z0-9-]|\\.[A-Za-z0-9]))"
+                    + "(?:[/?#]" + REST + ")?",
+            Pattern.CASE_INSENSITIVE);
 
     private static final Pattern EMAIL = Pattern.compile(
-            "(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\\.)+[A-Za-z]{2,}(?![A-Za-z0-9-])");
+            "(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\\.)+[A-Za-z]{2,}(?![A-Za-z0-9-])",
+            Pattern.CASE_INSENSITIVE);
 
     @Override public void configure(@NonNull Registry registry) {
         registry.require(CorePlugin.class, core -> core.addOnTextAddedListener(Links::added));
     }
 
+    @Override public void configureVisitor(@NonNull MarkwonVisitor.Builder builder) {
+        builder.on(Link.class, (visitor, link) -> {
+            final int length = visitor.length();
+            Integer prev = IN_LINK.get(visitor.renderProps());
+            IN_LINK.set(visitor.renderProps(), (prev == null ? 0 : prev) + 1);
+            try {
+                visitor.visitChildren(link);
+            } finally {
+                IN_LINK.set(visitor.renderProps(), prev);
+            }
+            CoreProps.LINK_DESTINATION.set(visitor.renderProps(), link.getDestination());
+            visitor.setSpansForNodeOptional(link, length);
+        });
+    }
+
     private static void added(@NonNull MarkwonVisitor visitor, @NonNull String text, int start) {
+        Integer depth = IN_LINK.get(visitor.renderProps());
+        if (depth != null && depth > 0) return;
         MarkwonConfiguration configuration = visitor.configuration();
         SpanFactory factory = configuration.spansFactory().get(Link.class);
         if (factory == null) return;

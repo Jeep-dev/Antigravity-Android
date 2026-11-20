@@ -94,31 +94,35 @@ final class Userland {
         pb.redirectErrorStream(true);
         Process p = pb.start();
         StringBuilder line = new StringBuilder(), tail = new StringBuilder();
-        try (java.io.Reader in = new java.io.InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8)) {
-            for (int c; (c = in.read()) >= 0; ) {
-                if (c != '\r' && c != '\n') { line.append((char) c); continue; }
-                String l = line.toString();
-                line.setLength(0);
-                if (l.isEmpty()) continue;
-                // "progress 37 86" (percent, size in MB): the download as it goes.
-                if (l.startsWith("progress ")) {
-                    String[] f = l.split(" ");
-                    if (f.length >= 3) status.accept("下载 Antigravity CLI " + f[1] + "%（共 " + f[2] + " MB）");
-                    continue;
-                }
-                if (l.startsWith("verify")) status.accept("校验 Antigravity CLI");
-                else if (l.startsWith("unpack")) status.accept("解压 Antigravity CLI");
-                tail.append(l).append('\n');
-            }
-        }
         try {
-            if (p.waitFor() != 0 || !hasAgy()) {
-                String t = tail.toString().trim();
-                throw new IOException("没能装上 Antigravity CLI" + (t.isEmpty() ? "" : "：" + t.substring(Math.max(0, t.length() - 300))));
+            try (java.io.Reader in = new java.io.InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8)) {
+                for (int c; (c = in.read()) >= 0; ) {
+                    if (c != '\r' && c != '\n') { line.append((char) c); continue; }
+                    String l = line.toString();
+                    line.setLength(0);
+                    if (l.isEmpty()) continue;
+                    // "progress 37 86" (percent, size in MB): the download as it goes.
+                    if (l.startsWith("progress ")) {
+                        String[] f = l.split(" ");
+                        if (f.length >= 3) status.accept("下载 Antigravity CLI " + f[1] + "%（共 " + f[2] + " MB）");
+                        continue;
+                    }
+                    if (l.startsWith("verify")) status.accept("校验 Antigravity CLI");
+                    else if (l.startsWith("unpack")) status.accept("解压 Antigravity CLI");
+                    tail.append(l).append('\n');
+                }
             }
-        } catch (InterruptedException e) {
-            p.destroy();
-            throw new IOException("被打断了");
+            try {
+                if (p.waitFor() != 0 || !hasAgy()) {
+                    String t = tail.toString().trim();
+                    throw new IOException("没能装上 Antigravity CLI" + (t.isEmpty() ? "" : "：" + t.substring(Math.max(0, t.length() - 300))));
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("被打断了");
+            }
+        } finally {
+            if (p.isAlive()) p.destroyForcibly();
         }
     }
 
@@ -157,19 +161,19 @@ final class Userland {
         long total = inApk ? assetLength(assets, "runtime/rootfs.tar.xz") : download.length();
         long[] done = {0};
         int[] shown = {-1};
-        InputStream source = inApk ? assets.open("runtime/rootfs.tar.xz", AssetManager.ACCESS_STREAMING) : new FileInputStream(download);
-        InputStream raw = new FilterInputStream(source) {
-            @Override public int read(byte[] b, int off, int len) throws IOException {
-                int n = super.read(b, off, len);
-                if (n > 0) {
-                    done[0] += n;
-                    int p = (int) (done[0] * 100 / Math.max(1, total));
-                    if (p != shown[0]) { shown[0] = p; status.accept("解压 " + p + "%"); }
-                }
-                return n;
-            }
-        };
-        try (InputStream in = new BufferedInputStream(new XZInputStream(new BufferedInputStream(raw, 1 << 16)), 1 << 16)) {
+        try (InputStream source = inApk ? assets.open("runtime/rootfs.tar.xz", AssetManager.ACCESS_STREAMING) : new FileInputStream(download);
+             InputStream raw = new FilterInputStream(source) {
+                 @Override public int read(byte[] b, int off, int len) throws IOException {
+                     int n = super.read(b, off, len);
+                     if (n > 0) {
+                         done[0] += n;
+                         int p = (int) (done[0] * 100 / Math.max(1, total));
+                         if (p != shown[0]) { shown[0] = p; status.accept("解压 " + p + "%"); }
+                     }
+                     return n;
+                 }
+             };
+             InputStream in = new BufferedInputStream(new XZInputStream(new BufferedInputStream(raw, 1 << 16)), 1 << 16)) {
             untar(in, rootfs);
         }
         download.delete();
@@ -310,15 +314,16 @@ final class Userland {
                     } catch (ErrnoException e) {
                         throw new IOException("symlink " + name + ": " + e.getMessage());
                     }
-                    String made = target.getPath();
-                    inside.removeIf(d -> d.equals(made) || d.startsWith(made + "/"));
+                    inside.clear();
                     break;
                 case '1': {
                     // Hard links become copies (the archive is made without them anyway), of a file inside.
-                    String from = link.startsWith("./") ? link.substring(2) : link;
+                    String from = link;
+                    while (from.startsWith("./")) from = from.substring(2);
                     File source = new File(into, from);
                     if (!relative(from) || !within(source, root, inside)) break;
                     remove(target);
+                    mkdirs(target.getParentFile());
                     try (InputStream src = new FileInputStream(source); OutputStream out = new FileOutputStream(target)) {
                         copy(src, out);
                     }
@@ -349,19 +354,19 @@ final class Userland {
         }
     }
 
-    /** A path in the archive that stays where it is put: not absolute, no "..". */
+    /** A path in the archive that stays where it is put: not absolute, no ".", "..", or empty segments. */
     private static boolean relative(String name) {
         if (name.isEmpty() || name.startsWith("/")) return false;
-        for (String part : name.split("/")) if (part.equals("..")) return false;
+        for (String part : name.split("/", -1)) if (part.isEmpty() || part.equals(".") || part.equals("..")) return false;
         return true;
     }
 
-    /** f, with every link on its way followed, is in root; folders found inside are remembered. */
+    /** f, with every link on its way followed, is in root; real folders found inside are remembered. */
     private static boolean within(File f, String root, Set<String> inside) throws IOException {
         if (inside.contains(f.getPath())) return true;
         String real = f.getCanonicalPath();
         boolean in = real.equals(root) || real.startsWith(root + "/");
-        if (in && f.isDirectory()) inside.add(f.getPath());
+        if (in && f.isDirectory() && !java.nio.file.Files.isSymbolicLink(f.toPath())) inside.add(f.getPath());
         return in;
     }
 
@@ -609,23 +614,27 @@ final class Userland {
                 env.append("export ").append(k).append("='").append(e.getValue().replace("'", "'\\''")).append("'\n");
             }
         }
-        write(new File(dir, "android.env"), env.toString());
+        replace(new File(dir, "android.env"), env.toString());
         // Android's linker reads its namespaces from /linkerconfig, a directory proot may not
         // bind (apps can read the file, not look at the directory): a copy, made at each boot.
         File ld = new File("/linkerconfig/ld.config.txt");
         File copyLd = new File(rootfs, "linkerconfig/ld.config.txt");
         if (ld.canRead() && ld.length() != copyLd.length()) {
+            File partLd = new File(copyLd.getPath() + ".part");
             try (InputStream in = new FileInputStream(ld)) {
                 mkdirs(copyLd.getParentFile());
-                try (OutputStream out = new FileOutputStream(copyLd)) {
+                try (OutputStream out = new FileOutputStream(partLd)) {
                     copy(in, out);
                 }
+                if (!partLd.renameTo(copyLd)) partLd.delete();
             } catch (IOException ignored) {
+                partLd.delete();
                 // rish will say what it misses
             }
         }
         File rish = new File(rootfs, "usr/local/bin/rish");
-        write(rish, "#!/bin/sh\n"
+        File rishPart = new File(rish.getPath() + ".part");
+        write(rishPart, "#!/bin/sh\n"
                 + "dex=/opt/agyapp/rish_shizuku.dex\n"
                 + "[ -f $dex ] || { echo 'rish: 没有安装 Shizuku' >&2; exit 1; }\n"
                 + ". /opt/agyapp/android.env\n"
@@ -633,9 +642,14 @@ final class Userland {
                 + "exec /system/bin/app_process -Djava.class.path=$dex /system/bin --nice-name=rish "
                 + "rikka.shizuku.shell.ShizukuShellLoader \"$@\"\n");
         try {
-            Os.chmod(rish.getPath(), 0755);
+            Os.chmod(rishPart.getPath(), 0755);
         } catch (ErrnoException e) {
+            rishPart.delete();
             throw new IOException(e);
+        }
+        if (!rishPart.renameTo(rish)) {
+            rishPart.delete();
+            throw new IOException("could not move " + rishPart + " in");
         }
     }
 

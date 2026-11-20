@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import socket
 import stat
 import sys
@@ -275,6 +276,13 @@ def main():
     record = '--record' in sys.argv
     bridge_path = os.path.abspath(args[0] if args else os.path.join(HERE, '..', '..', 'main', 'assets', 'bridge.py'))
     tmp = tempfile.mkdtemp(prefix='bridgetest')
+    try:
+        return run_tests(bridge_path, record, tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def run_tests(bridge_path, record, tmp):
     home = os.path.join(tmp, 'home')
     os.makedirs(os.path.join(tmp, 'bin'))
     os.makedirs(home)

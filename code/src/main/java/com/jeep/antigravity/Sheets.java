@@ -28,27 +28,39 @@ final class Sheets extends Part {
         SheetBox box = new SheetBox(app);
         Dialog d = new Dialog(app, R.style.Sheet) {
             private boolean leaving;
+            private android.animation.ValueAnimator dimAnim;
 
             /** Up from the bottom edge, the dim coming with it. */
             @Override public void show() {
+                if (app.isFinishing() || app.isDestroyed()) return;
                 super.show();
                 Window w = getWindow();
                 box.setTranslationY(app.getResources().getDisplayMetrics().heightPixels);
                 box.post(() -> {
+                    if (!isShowing() || leaving || app.isFinishing() || app.isDestroyed()) return;
                     box.setTranslationY(box.getHeight());
                     box.animate().translationY(0).setDuration(Motion.PAGE).setInterpolator(Motion.EMPHASIZED).start();
-                    dim(w, 0f, SHEET_DIM);
+                    dimAnim = dim(w, dimAnim, 0f, SHEET_DIM);
                 });
             }
 
             /** Down out of sight, the dim going, and only then away: however it is closed. */
             @Override public void dismiss() {
                 if (leaving) return;
-                if (!isShowing() || app.isFinishing() || app.isDestroyed() || box.getHeight() == 0) { super.dismiss(); return; }
+                if (!isShowing() || app.isFinishing() || app.isDestroyed() || box.getHeight() == 0) {
+                    if (dimAnim != null) { dimAnim.cancel(); dimAnim = null; }
+                    try { super.dismiss(); } catch (IllegalArgumentException ignored) {}
+                    return;
+                }
                 leaving = true;
-                dim(getWindow(), SHEET_DIM, 0f);
+                dimAnim = dim(getWindow(), dimAnim, SHEET_DIM, 0f);
                 box.animate().translationY(box.getHeight()).setDuration(250).setInterpolator(Motion.EMPHASIZED)
-                        .withEndAction(super::dismiss).start();
+                        .withEndAction(() -> {
+                            if (dimAnim != null) { dimAnim.cancel(); dimAnim = null; }
+                            if (isShowing() && !app.isFinishing() && !app.isDestroyed()) {
+                                try { super.dismiss(); } catch (IllegalArgumentException ignored) {}
+                            }
+                        }).start();
             }
         };
         d.requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -107,13 +119,15 @@ final class Sheets extends Part {
         return d;
     }
 
-    private static void dim(Window w, float from, float to) {
-        if (w == null) return;
+    private static android.animation.ValueAnimator dim(Window w, android.animation.ValueAnimator prev, float from, float to) {
+        if (prev != null) prev.cancel();
+        if (w == null) return null;
         android.animation.ValueAnimator a = android.animation.ValueAnimator.ofFloat(from, to);
         a.setDuration(to > from ? Motion.PAGE : 250);
         a.setInterpolator(Motion.EMPHASIZED);
         a.addUpdateListener(x -> w.setDimAmount((float) x.getAnimatedValue()));
         a.start();
+        return a;
     }
 
     LinearLayout content(Dialog d) {
@@ -198,10 +212,16 @@ final class Sheets extends Part {
         Toggle t = new Toggle(app, on);
         row.addView(t);
         Ui.margins(t, app, 16, 0, 0, 0);
+        Runnable[] pending = {null};
         row.setOnClickListener(v -> {
             t.flip();
+            if (pending[0] != null) ui.removeCallbacks(pending[0]);
             // Redrawn by what it sets: after the thumb has moved.
-            ui.postDelayed(() -> set.accept(t.isOn()), 260);
+            pending[0] = () -> {
+                pending[0] = null;
+                if (!app.isFinishing() && !app.isDestroyed()) set.accept(t.isOn());
+            };
+            ui.postDelayed(pending[0], 260);
         });
     }
 
@@ -236,7 +256,9 @@ final class Sheets extends Part {
                     choiceLook(buttons[index], shapes[index], index, n, f);
                 });
                 a.addListener(new android.animation.AnimatorListenerAdapter() {
-                    @Override public void onAnimationEnd(android.animation.Animator x) { pick.accept(index); }
+                    @Override public void onAnimationEnd(android.animation.Animator x) {
+                        if (!app.isFinishing() && !app.isDestroyed()) pick.accept(index);
+                    }
                 });
                 a.start();
             });

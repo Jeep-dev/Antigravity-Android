@@ -33,6 +33,7 @@ public final class TerminalActivity extends Activity implements TerminalSessionC
     private static TerminalSession session;
     /** The screen showing it; when none does, it reports to {@link #AWAY}. */
     private static TerminalActivity shown;
+    private static boolean starting;
     private static int textSizeDp = 12;
 
     private TerminalView view;
@@ -72,6 +73,8 @@ public final class TerminalActivity extends Activity implements TerminalSessionC
             attach();
             return;
         }
+        if (starting) return;
+        starting = true;
         // Getting the userland ready writes files (and may copy Shizuku's dex): not on the main thread.
         new Thread(() -> {
             List<String> cmd;
@@ -79,18 +82,34 @@ public final class TerminalActivity extends Activity implements TerminalSessionC
                 cmd = userland.command("/bin/bash", "-l");
             } catch (IOException e) {
                 runOnUiThread(() -> {
+                    starting = false;
+                    if (isFinishing() || isDestroyed()) return;
                     Toast.makeText(this, "启动终端失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
                     finish();
                 });
                 return;
             }
             runOnUiThread(() -> {
+                starting = false;
                 if (isFinishing() || isDestroyed()) return;
+                if (session != null && session.isRunning()) {
+                    session.updateTerminalSessionClient(this);
+                    attach();
+                    return;
+                }
                 session = new TerminalSession(cmd.get(0), userland.base.getPath(), cmd.toArray(new String[0]),
                         userland.env(), 3000, this);
                 attach();
             });
         }, "terminal-start").start();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (session != null && session.isRunning() && shown != this && view != null) {
+            session.updateTerminalSessionClient(this);
+            attach();
+        }
     }
 
     private void attach() {
@@ -213,7 +232,7 @@ public final class TerminalActivity extends Activity implements TerminalSessionC
         ClipData clip = cm.getPrimaryClip();
         if (clip == null || clip.getItemCount() == 0) return;
         CharSequence text = clip.getItemAt(0).coerceToText(this);
-        if (text != null && session != null) session.getEmulator().paste(text.toString());
+        if (text != null && session != null && session.getEmulator() != null) session.getEmulator().paste(text.toString());
     }
 
     private void showKeyboard() {

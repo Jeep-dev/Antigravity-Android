@@ -35,7 +35,10 @@ final class Attachments extends Part {
     void picked(Intent data) {
         List<Uri> uris = new ArrayList<>();
         if (data.getClipData() != null) {
-            for (int i = 0; i < data.getClipData().getItemCount(); i++) uris.add(data.getClipData().getItemAt(i).getUri());
+            for (int i = 0; i < data.getClipData().getItemCount(); i++) {
+                Uri u = data.getClipData().getItemAt(i).getUri();
+                if (u != null) uris.add(u);
+            }
         } else if (data.getData() != null) {
             uris.add(data.getData());
         }
@@ -64,8 +67,8 @@ final class Attachments extends Part {
         } catch (RuntimeException ignored) {
             // name stays "file"
         }
-        String type = app.getContentResolver().getType(uri);
         try {
+            String type = app.getContentResolver().getType(uri);
             if (type != null && type.matches("image/(png|jpe?g|gif|webp|bmp|heic|heif|avif)")) {
                 // agy scales a picture for the model itself and keeps the original, whose path,
                 // size and scale it gives the model: one it reads goes as it is, up to 10 MB (held in
@@ -75,7 +78,8 @@ final class Attachments extends Part {
                 BitmapFactory.Options o = new BitmapFactory.Options();
                 o.inJustDecodeBounds = true;
                 try (InputStream in = app.getContentResolver().openInputStream(uri)) { BitmapFactory.decodeStream(in, null, o); }
-                int longer = Math.max(o.outWidth, o.outHeight), sample = 1;
+                int origW = o.outWidth, origH = o.outHeight;
+                int longer = Math.max(origW, origH), sample = 1;
                 // Decoded only as large as needed: for the thread's copy (2000 px), or for the JPEG sent (4096 px).
                 if (raw != null) while (longer / (sample * 2) >= 2000) sample *= 2;
                 else while (longer / sample > 4096) sample *= 2;
@@ -84,21 +88,31 @@ final class Attachments extends Part {
                 Bitmap bmp;
                 try (InputStream in = app.getContentResolver().openInputStream(uri)) { bmp = BitmapFactory.decodeStream(in, null, o); }
                 if (bmp == null) { ui.post(() -> toast("这张图片读不了")); return null; }
-                byte[] sent = raw != null ? raw : jpeg(bmp, 4096, 95);
-                Bitmap thumb = Bitmap.createScaledBitmap(bmp, dp(64), Math.max(1, dp(64) * bmp.getHeight() / bmp.getWidth()), true);
-                Chat.Attachment a = new Chat.Attachment(true, name, raw == null || type.equals("image/jpg") ? "image/jpeg" : type,
-                        Base64.encodeToString(sent, Base64.NO_WRAP), null, sent.length, thumb);
-                // The thread keeps a copy to show, of the size the model sees, not the picture sent.
-                int w = raw != null ? o.outWidth : bmp.getWidth(), h = raw != null ? o.outHeight : bmp.getHeight();
-                a.shown = "data:image/jpeg;base64," + Base64.encodeToString(jpeg(bmp, modelLonger(w, h), 92), Base64.NO_WRAP);
-                if (thumb != bmp) bmp.recycle(); // the same bitmap when it is already thumbnail size
-                return a;
+                Bitmap thumb = null;
+                try {
+                    byte[] sent = raw != null ? raw : jpeg(bmp, 4096, 95);
+                    int maxThumb = dp(64);
+                    int bw = Math.max(1, bmp.getWidth()), bh = Math.max(1, bmp.getHeight());
+                    float scale = Math.min(1f, (float) maxThumb / Math.max(bw, bh));
+                    thumb = Bitmap.createScaledBitmap(bmp, Math.max(1, Math.round(bw * scale)), Math.max(1, Math.round(bh * scale)), true);
+                    Chat.Attachment a = new Chat.Attachment(true, name, raw == null || type.equals("image/jpg") ? "image/jpeg" : type,
+                            Base64.encodeToString(sent, Base64.NO_WRAP), null, sent.length, thumb);
+                    // The thread keeps a copy to show, of the size the model sees, not the picture sent.
+                    int w = raw != null && origW > 0 ? origW : bmp.getWidth(), h = raw != null && origH > 0 ? origH : bmp.getHeight();
+                    a.shown = "data:image/jpeg;base64," + Base64.encodeToString(jpeg(bmp, modelLonger(w, h), 92), Base64.NO_WRAP);
+                    return a;
+                } finally {
+                    if (thumb != bmp) bmp.recycle(); // the same bitmap when it is already thumbnail size
+                }
             }
             // A file is read only when it is saved, straight into the folder: never held here.
             try (InputStream in = app.getContentResolver().openInputStream(uri)) {
                 if (in == null) return null;
             }
             return new Chat.Attachment(false, name, type, null, uri, size, null);
+        } catch (OutOfMemoryError e) {
+            ui.post(() -> toast("这张图片太大，读不了"));
+            return null;
         } catch (Exception e) {
             ui.post(() -> toast("这个文件读不了"));
             return null;

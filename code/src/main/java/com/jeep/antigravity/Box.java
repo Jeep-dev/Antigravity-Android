@@ -88,6 +88,7 @@ final class Box extends Part {
         input.setHorizontallyScrolling(false);
         input.setMaxLines(Integer.MAX_VALUE);
         input.setOnEditorActionListener((v, action, event) -> {
+            if (event != null && event.isShiftPressed()) return false;
             if (action == EditorInfo.IME_ACTION_SEND || action == EditorInfo.IME_NULL) {
                 if (event == null || event.getAction() == android.view.KeyEvent.ACTION_DOWN) app.sender.send();
                 return true;
@@ -96,7 +97,14 @@ final class Box extends Part {
         });
         // A physical Enter sends too; Shift+Enter makes a new line.
         input.setOnKeyListener((v, code, event) -> {
-            if (code != android.view.KeyEvent.KEYCODE_ENTER || event.isShiftPressed()) return false;
+            if (code != android.view.KeyEvent.KEYCODE_ENTER) return false;
+            if (event.isShiftPressed()) {
+                if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
+                    int a = Math.max(0, input.getSelectionStart()), b = Math.max(0, input.getSelectionEnd());
+                    input.getText().replace(Math.min(a, b), Math.max(a, b), "\n");
+                }
+                return true;
+            }
             if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) app.sender.send();
             return true;
         });

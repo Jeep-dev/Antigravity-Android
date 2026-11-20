@@ -38,8 +38,10 @@ public final class BridgeService extends Service {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private Userland userland;
     private PowerManager.WakeLock wake;
-    /** The bridge's process: set and cleared on the worker, read by the watcher and onDestroy (a watcher must see it replaced or stopped). */
+    private final Object procLock = new Object();
+    /** The bridge's process: set and cleared under procLock, read by the watcher and onDestroy. */
     private volatile Process proc;
+    private volatile boolean destroyed;
     /** Restarts after the bridge died on its own, in the last minute: a crash loop stops at three. */
     private final long[] deaths = new long[3];
     private int deathCount;
@@ -91,19 +93,28 @@ public final class BridgeService extends Service {
 
     @Override public void onDestroy() {
         unregisterReceiver(zone);
+        Process p;
+        synchronized (procLock) {
+            destroyed = true;
+            p = proc;
+            proc = null; // its watcher must not start another on the stopped worker
+        }
         worker.shutdownNow();
-        Process p = proc;
-        proc = null; // its watcher must not start another on the stopped worker
         int pid = userland.bridgePid();
         if (pid > 0) android.os.Process.sendSignal(pid, 15); // proot ignores SIGTERM: the bridge is told
-        if (p != null) p.destroy();
+        if (p != null) {
+            if (pid > 0) p.destroy();
+            else p.destroyForcibly(); // bridge.pid not written yet: proot ignores SIGTERM
+        }
         if (wake != null && wake.isHeld()) wake.release();
         super.onDestroy();
     }
 
     /** Stops the running bridge, if any, and starts a new one. On the worker thread. */
     private void run(String reason) {
+        if (destroyed) return;
         stopBridge();
+        if (destroyed) return;
         if (!userland.ready()) {
             log("not started (" + reason + "): the userland is not unpacked");
             return;
@@ -120,7 +131,13 @@ public final class BridgeService extends Service {
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(userland.log));
             log("starting the bridge (" + reason + ")");
             Process p = pb.start();
-            proc = p;
+            synchronized (procLock) {
+                if (destroyed) {
+                    p.destroyForcibly();
+                    return;
+                }
+                proc = p;
+            }
             Thread watch = new Thread(() -> watch(p), "bridge-watch");
             watch.setDaemon(true);
             watch.start();
@@ -134,14 +151,21 @@ public final class BridgeService extends Service {
      * conversations and exits, and proot then ends whatever is left under it and exits too.
      */
     private void stopBridge() {
-        Process p = proc;
-        proc = null;
+        Process p;
+        synchronized (procLock) {
+            p = proc;
+            proc = null;
+        }
         int pid = userland.bridgePid();
         if (pid > 0) android.os.Process.sendSignal(pid, 15);
         if (p == null) return;
+        if (pid <= 0) {
+            p.destroyForcibly();
+            return;
+        }
         try {
             if (p.waitFor(6, TimeUnit.SECONDS)) return;
-            if (pid > 0) android.os.Process.sendSignal(pid, 9);
+            android.os.Process.sendSignal(pid, 9);
             if (!p.waitFor(2, TimeUnit.SECONDS)) p.destroyForcibly();
         } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();

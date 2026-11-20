@@ -41,13 +41,9 @@ final class Agent extends Part {
         // An int under "mode" is the dark mode of before (Themes moves it to its own key).
         Object m = prefs.getAll().get("mode");
         mode = m instanceof String ? (String) m : "";
-        try {
-            fill(efforts, new JSONArray(prefs.getString("efforts", "[]")));
-            fill(permissionModes, new JSONArray(prefs.getString("permissionModes", "[]")));
-            claudeModels = new JSONArray(prefs.getString("claudeModels", "[]"));
-        } catch (JSONException ignored) {
-            // none saved
-        }
+        try { fill(efforts, new JSONArray(prefs.getString("efforts", "[]"))); } catch (JSONException ignored) {}
+        try { fill(permissionModes, new JSONArray(prefs.getString("permissionModes", "[]"))); } catch (JSONException ignored) {}
+        try { claudeModels = new JSONArray(prefs.getString("claudeModels", "[]")); } catch (JSONException ignored) {}
         try {
             JSONArray saved = new JSONArray(prefs.getString("commands", "[]"));
             for (int i = 0; i < saved.length(); i++) commands.add(saved.optString(i));
@@ -81,9 +77,10 @@ final class Agent extends Part {
         // Found a moment after the bridge starts: until then, the last ones it gave.
         if (data.optJSONArray("efforts") != null && data.optJSONArray("efforts").length() > 0) {
             fill(efforts, data.optJSONArray("efforts"));
-            fill(permissionModes, data.optJSONArray("permissionModes"));
+            JSONArray pm = data.optJSONArray("permissionModes");
+            fill(permissionModes, pm);
             prefs.edit().putString("efforts", data.optJSONArray("efforts").toString())
-                    .putString("permissionModes", String.valueOf(data.optJSONArray("permissionModes"))).apply();
+                    .putString("permissionModes", pm == null ? "[]" : pm.toString()).apply();
         }
         app.screen.updateChrome();
     }
@@ -100,7 +97,7 @@ final class Agent extends Part {
 
     String tilde(String p) {
         if (p == null) return "";
-        return !home.isEmpty() && p.startsWith(home) ? "~" + p.substring(home.length()) : p;
+        return !home.isEmpty() && (p.equals(home) || p.startsWith(home + "/")) ? "~" + p.substring(home.length()) : p;
     }
 
     /** The thinking level in use: picked here, else agy's own setting. */

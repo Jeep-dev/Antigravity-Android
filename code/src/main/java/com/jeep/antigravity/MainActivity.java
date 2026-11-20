@@ -72,12 +72,14 @@ public final class MainActivity extends Activity implements Bridge.Events {
     // views
     DrawerFrame frame;
     private boolean renderQueued;
+    private java.util.function.Function<String, byte[]> imageReader;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         prefs = getSharedPreferences("app", MODE_PRIVATE);
         bridge = new Bridge(this, this);
-        Images.saved = bridge::image;
+        imageReader = bridge::image;
+        Images.saved = imageReader;
         userland = new Userland(this);
         // The parts of the screen, the first two being what the others reach by name (Part, which checks it).
         agent = new Agent(this);
@@ -141,7 +143,12 @@ public final class MainActivity extends Activity implements Bridge.Events {
     }
 
     @Override protected void onDestroy() {
-        ui.removeCallbacks(ticker);
+        ui.removeCallbacksAndMessages(null);
+        if (Images.saved == imageReader) Images.saved = null;
+        if (settings != null && settings.settingsPage != null) {
+            try { settings.settingsPage.dismiss(); } catch (IllegalArgumentException ignored) {}
+            settings.settingsPage = null;
+        }
         bridge.close();
         work.shutdownNow();
         super.onDestroy();
@@ -238,11 +245,15 @@ public final class MainActivity extends Activity implements Bridge.Events {
 
     /** A conversation deleted: it and its session are forgotten, and what its claude still says is let go (see chatFor). */
     void drop(String key, String sessionId) {
-        chats.remove(key);
-        bySession.remove(sessionId);
-        bySession.values().remove(key);
-        dropped.add(key);
-        dropped.add(sessionId);
+        if (key != null && !key.isEmpty()) {
+            chats.remove(key);
+            bySession.values().remove(key);
+            dropped.add(key);
+        }
+        if (sessionId != null && !sessionId.isEmpty()) {
+            bySession.remove(sessionId);
+            dropped.add(sessionId);
+        }
     }
 
     /** The conversation an event belongs to, made when it is not known yet; null for one deleted. */
@@ -252,7 +263,8 @@ public final class MainActivity extends Activity implements Bridge.Events {
         if (chat != null) return chat;
         if (dropped.contains(key)) return null;
         JSONObject data = ev.optJSONObject("data");
-        String sid = data != null && data.has("session_id") ? data.optString("session_id") : key.startsWith("n-") ? null : key;
+        String sid = data != null && !data.isNull("session_id") && !data.optString("session_id").isEmpty()
+                ? data.optString("session_id") : key.startsWith("n-") ? null : key;
         if (sid != null && dropped.contains(sid)) return null;
         if (sid != null && bySession.containsKey(sid) && chats.containsKey(bySession.get(sid))) return chats.get(bySession.get(sid));
         // Started before this app was: its history loads from the transcript when opened.

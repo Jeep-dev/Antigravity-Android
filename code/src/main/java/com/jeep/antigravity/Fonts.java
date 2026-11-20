@@ -91,9 +91,9 @@ final class Fonts {
             } else if (second != null) {
                 b = new Typeface.CustomFallbackBuilder(second);
             } else {
-                return Typeface.create(latin, Typeface.NORMAL);
+                return Typeface.create(latin.equals(SANS) ? SANS : SERIF, Typeface.NORMAL);
             }
-            b.setSystemFallback(second == null ? cjk : SANS);
+            b.setSystemFallback(second == null && (cjk.equals(SERIF) || cjk.equals(SANS)) ? cjk : SANS);
             return b.build();
         } catch (RuntimeException e) {
             return Typeface.create(SERIF, Typeface.NORMAL);
@@ -145,7 +145,7 @@ final class Fonts {
     }
 
     private static String group(String fileName) {
-        return fileName.replaceAll("\\.(ttf|otf|ttc)$", "").replaceAll("-[^-]*$", "");
+        return fileName.replaceAll("(?i)\\.(ttf|otf|ttc)$", "").replaceAll("-[^-]*$", "");
     }
 
     private static Typeface fileTypeface(Context c, String name) {
@@ -170,7 +170,7 @@ final class Fonts {
                 List<Font> list = out.get(group);
                 if (list == null) out.put(group, list = new ArrayList<>());
                 boolean hans = locales != null && locales.toLanguageTags().contains("Hans");
-                if (file.getName().endsWith(".ttc") && f.getTtcIndex() > 0 && !hans) continue;
+                if (file.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".ttc") && f.getTtcIndex() > 0 && !hans) continue;
                 if (hans) list.add(0, f); else list.add(f);
             }
         }
@@ -190,7 +190,7 @@ final class Fonts {
                 if (!cjk && group.matches("Noto(Sans|Serif)(?!CJK|Mono)[A-Z]\\w+.*")) continue;
                 FontFamily fam = family(c, "sys:" + group);
                 Typeface t = typeface(fam);
-                if (t != null && covers(t, sample, fam.getFont(0))) out.add(new Choice("sys:" + group, group, t));
+                if (t != null && covers(t, sample, fam)) out.add(new Choice("sys:" + group, group, t));
             }
         }
         File[] files = dir(c).listFiles();
@@ -198,8 +198,8 @@ final class Fonts {
             for (File f : files) {
                 Typeface t = fileTypeface(c, f.getName());
                 FontFamily fam = family(c, "file:" + f.getName());
-                if (t != null && (fam == null || covers(typeface(fam), sample, fam.getFont(0)))) {
-                    out.add(new Choice("file:" + f.getName(), f.getName().replaceAll("\\.(ttf|otf|ttc)$", ""), t));
+                if (t != null && (fam == null || covers(typeface(fam), sample, fam))) {
+                    out.add(new Choice("file:" + f.getName(), f.getName().replaceAll("(?i)\\.(ttf|otf|ttc)$", ""), t));
                 }
             }
         }
@@ -215,13 +215,17 @@ final class Fonts {
         }
     }
 
-    /** Whether the font itself (not a fallback) draws the character; unknown before Android 12: yes. */
-    private static boolean covers(Typeface t, String ch, Font own) {
+    /** Whether the font family itself (not a fallback) draws the character; unknown before Android 12: yes. */
+    private static boolean covers(Typeface t, String ch, FontFamily own) {
         if (Build.VERSION.SDK_INT < 31) return true;
-        if (t == null) return false;
+        if (t == null || own == null) return false;
         Font used = drawnBy(t, ch);
-        return used != null && used.getFile() != null && own.getFile() != null
-                && used.getFile().equals(own.getFile()) && used.getTtcIndex() == own.getTtcIndex();
+        if (used == null || used.getFile() == null) return false;
+        for (int i = 0; i < own.getSize(); i++) {
+            Font f = own.getFont(i);
+            if (f.getFile() != null && used.getFile().equals(f.getFile()) && used.getTtcIndex() == f.getTtcIndex()) return true;
+        }
+        return false;
     }
 
     /** The name shown for a choice. */
@@ -229,6 +233,6 @@ final class Fonts {
         if (id.equals(SERIF)) return "衬线";
         if (id.equals(SANS)) return "无衬线";
         String n = id.substring(id.indexOf(':') + 1);
-        return n.replaceAll("\\.(ttf|otf|ttc)$", "");
+        return n.replaceAll("(?i)\\.(ttf|otf|ttc)$", "");
     }
 }

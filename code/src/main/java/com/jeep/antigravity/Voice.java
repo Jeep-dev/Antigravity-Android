@@ -129,6 +129,8 @@ final class Voice extends Part {
                 toast("这台手机没有语音识别服务：可以用输入法自带的语音键");
                 return;
             }
+            sentence = "";
+            givenUp = 0;
             listen.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
             app.startActivityForResult(listen, MainActivity.VOICE);
             return;
@@ -267,7 +269,7 @@ final class Voice extends Part {
     void picked(int result, Intent data) {
         if (result != android.app.Activity.RESULT_OK || data == null) return;
         ArrayList<String> said = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
-        if (said != null && !said.isEmpty()) write(said.get(0));
+        if (said != null && !said.isEmpty()) { write(said.get(0)); nextSentence(); }
     }
 
     private final RecognitionListener listener = new RecognitionListener() {
@@ -284,11 +286,13 @@ final class Voice extends Part {
         }
 
         @Override public void onPartialResults(Bundle b) {
+            if (!on) return;
             String t = first(b);
             if (t != null && !t.isEmpty()) write(t);
         }
 
         @Override public void onResults(Bundle b) {
+            if (!on) return;
             String t = first(b);
             if (t != null && !t.isEmpty()) { write(t); quiet = 0; } else quiet++;
             nextSentence();
@@ -296,10 +300,11 @@ final class Voice extends Part {
         }
 
         @Override public void onError(int error) {
+            if (!on || between) return;
             if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
                 quiet++;
                 spanEnd = Math.max(spanStart, spanEnd); // what was partly heard stays
-                spanStart = spanEnd;
+                nextSentence();
                 next();
                 return;
             }

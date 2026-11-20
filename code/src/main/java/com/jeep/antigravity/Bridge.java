@@ -53,6 +53,8 @@ final class Bridge {
     private boolean flushQueued;
     /** When this app last asked for the bridge to start: a start still under way is not repeated. */
     private volatile long startedAt;
+    private volatile boolean closed;
+    private volatile Answer activeEvent;
 
     Bridge(Context context, Events listener) {
         this.context = context.getApplicationContext();
@@ -84,8 +86,21 @@ final class Bridge {
 
     void post(String path, JSONObject body, Reply reply) { request("POST", path, body.toString(), reply); }
 
+    private void postUi(Runnable r) {
+        if (!closed) ui.post(() -> { if (!closed) r.run(); });
+    }
+
+    private void submit(Runnable r) {
+        if (closed) return;
+        try {
+            pool.execute(r);
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // closed meanwhile
+        }
+    }
+
     private void request(String method, String path, String body, Reply reply) {
-        pool.execute(() -> answer(exchange(method, path, body), reply));
+        submit(() -> answer(exchange(method, path, body), reply));
     }
 
     private void answer(Object[] r, Reply reply) {
@@ -96,7 +111,7 @@ final class Bridge {
             data = new JSONObject();
         }
         JSONObject result = data;
-        if (reply != null) ui.post(() -> reply.done((int) r[0], result));
+        if (reply != null) postUi(() -> reply.done((int) r[0], result));
     }
 
     /**
@@ -104,7 +119,7 @@ final class Bridge {
      * held whole); the reply has the path it got.
      */
     void upload(String cwd, String name, android.net.Uri uri, Reply reply) {
-        pool.execute(() -> {
+        submit(() -> {
             android.content.ContentResolver resolver = context.getContentResolver();
             java.io.File spool = null;
             try {
@@ -173,14 +188,14 @@ final class Bridge {
         // before the answer: these may take minutes.
         int timeout = path.startsWith("/health") ? 3000
                 : path.startsWith("/upload") ? 310_000 : 30000;
-        long start = System.currentTimeMillis();
+        long start = android.os.SystemClock.elapsedRealtime();
         try (Answer a = send(method, path, type, length, body, timeout)) {
             return new Object[]{a.status, readBody(a)};
         } catch (Refused e) {
             return new Object[]{REFUSED, String.valueOf(e.getMessage())};
         } catch (IOException e) {
             // A read that timed out is only an error on a LocalSocket: told by the time it took.
-            return new Object[]{System.currentTimeMillis() - start >= timeout - 50 ? -2 : -1, ""};
+            return new Object[]{android.os.SystemClock.elapsedRealtime() - start >= timeout - 50 ? -2 : -1, ""};
         }
     }
 
@@ -237,9 +252,9 @@ final class Bridge {
                 throw new IOException("not an HTTP answer", e);
             }
             return a;
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException | Error t) {
             try { s.close(); } catch (IOException ignored) { /* closed */ }
-            throw e;
+            throw t;
         }
     }
 
@@ -282,26 +297,42 @@ final class Bridge {
      * Result: "ok", "install" (the userland is not unpacked yet) or "timeout".
      */
     void connect(boolean restart, java.util.function.Consumer<String> done) {
-        pool.execute(() -> {
+        submit(() -> {
             String result;
             String why = restart ? "restart asked in the app" : isUp();
             if (why == null) result = "ok";
             else if (!userland.ready()) result = "install";
-            else if (System.currentTimeMillis() - startedAt < 30_000 && !restart) result = waitUntilUp();
+            else if (startedAt != 0 && android.os.SystemClock.elapsedRealtime() - startedAt < 30_000 && !restart) result = waitUntilUp(0);
             else {
+                double oldStarted = restart ? healthStarted(exchange("GET", "/health", null)) : 0;
                 run(why);
-                result = waitUntilUp();
+                result = waitUntilUp(oldStarted);
             }
-            if ("ok".equals(result) && reading.compareAndSet(false, true)) pool.execute(this::readEvents);
+            if ("ok".equals(result) && !closed && reading.compareAndSet(false, true)) submit(this::readEvents);
             String r = result;
-            ui.post(() -> done.accept(r));
+            postUi(() -> done.accept(r));
         });
     }
 
+    private double healthStarted(Object[] health) {
+        if ((int) health[0] != 200) return 0;
+        try {
+            return new JSONObject((String) health[1]).optDouble("started", 0);
+        } catch (JSONException e) {
+            return 0;
+        }
+    }
+
     private boolean isCurrent(Object[] health) {
+        return isCurrent(health, 0);
+    }
+
+    private boolean isCurrent(Object[] health, double notStarted) {
         if ((int) health[0] != 200) return false;
         try {
-            return new JSONObject((String) health[1]).optInt("version") == version();
+            JSONObject h = new JSONObject((String) health[1]);
+            if (h.optInt("version") != version()) return false;
+            return notStarted == 0 || h.optDouble("started", 0) != notStarted;
         } catch (JSONException e) {
             return false;
         }
@@ -333,11 +364,11 @@ final class Bridge {
     }
 
     /** Waits at most 30 s for the bridge just started (proot and Python take a while on a phone). */
-    private String waitUntilUp() {
-        long end = System.currentTimeMillis() + 30_000;
-        while (System.currentTimeMillis() < end) {
+    private String waitUntilUp(double notStarted) {
+        long end = android.os.SystemClock.elapsedRealtime() + 30_000;
+        while (!closed && android.os.SystemClock.elapsedRealtime() < end) {
             try { Thread.sleep(100); } catch (InterruptedException e) { return "timeout"; }
-            if (isCurrent(exchange("GET", "/health", null))) return "ok";
+            if (isCurrent(exchange("GET", "/health", null), notStarted)) return "ok";
         }
         return "timeout";
     }
@@ -346,28 +377,36 @@ final class Bridge {
     private void run(String why) {
         lastSeq = -1;
         lastBridge = null;
-        startedAt = System.currentTimeMillis();
-        ui.post(() -> BridgeService.start(context, why));
+        startedAt = android.os.SystemClock.elapsedRealtime();
+        postUi(() -> BridgeService.start(context, why));
     }
 
     /** Reads the event stream, reconnecting, and hands events over in batches. */
     private void readEvents() {
         boolean up = false;
-        while (reading.get()) {
+        while (reading.get() && !closed) {
             Answer a = null;
             try {
                 String bridge = lastBridge;
                 String path = "/events?since=" + lastSeq + (lastSeq >= 0 && bridge != null ? "&bridge=" + android.net.Uri.encode(bridge) : "");
                 a = send("GET", path, null, 0, null, 15000); // three missed pings: the bridge is gone or frozen
+                activeEvent = a;
                 if (a.status != 200) throw new IOException("status " + a.status);
                 if (!up) {
                     up = true;
-                    ui.post(() -> listener.link(true));
+                    postUi(() -> listener.link(true));
                 }
                 BufferedReader reader = new BufferedReader(
                         new InputStreamReader(a.in, StandardCharsets.UTF_8));
-                for (String line; reading.get() && (line = reader.readLine()) != null; ) {
-                    if (line.startsWith(": hello ")) lastBridge = line.substring(8).trim();
+                for (String line; reading.get() && !closed && (line = reader.readLine()) != null; ) {
+                    if (line.startsWith(": hello ")) {
+                        String id = line.substring(8).trim();
+                        String prev = lastBridge;
+                        lastBridge = id;
+                        if (prev != null && !prev.equals(id)) {
+                            postUi(() -> { listener.link(false); listener.link(true); });
+                        }
+                    }
                     if (!line.startsWith("data: ")) continue;
                     try {
                         JSONObject event = new JSONObject(line.substring(6));
@@ -377,25 +416,30 @@ final class Bridge {
                         // not an event
                     }
                 }
+                if (reading.get() && !closed) throw new EOFException("event stream closed");
             } catch (IOException e) {
                 if (up) {
                     up = false;
-                    ui.post(() -> listener.link(false));
+                    postUi(() -> listener.link(false));
                 }
+                if (!reading.get() || closed) return;
                 try { Thread.sleep(1500); } catch (InterruptedException ignored) { return; }
             } finally {
+                if (activeEvent == a) activeEvent = null;
                 if (a != null) a.close();
             }
         }
     }
 
     private void queue(JSONObject event) {
+        if (closed) return;
         synchronized (pending) {
             pending.add(event);
             if (flushQueued) return;
             flushQueued = true;
         }
         ui.postDelayed(() -> {
+            if (closed) return;
             List<JSONObject> batch;
             synchronized (pending) {
                 batch = new ArrayList<>(pending);
@@ -407,7 +451,12 @@ final class Bridge {
     }
 
     void close() {
+        closed = true;
         reading.set(false);
+        Answer a = activeEvent;
+        activeEvent = null;
+        if (a != null) a.close();
+        ui.removeCallbacksAndMessages(null);
         pool.shutdownNow();
     }
 }

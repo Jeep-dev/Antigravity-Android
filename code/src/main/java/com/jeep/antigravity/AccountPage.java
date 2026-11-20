@@ -15,6 +15,8 @@ import org.json.JSONObject;
  * models agy offers.
  */
 final class AccountPage extends Part {
+    private boolean loggingIn;
+
     AccountPage(MainActivity app) { super(app); }
 
     /** Who agy is signed in as, as the bridge last said. */
@@ -58,8 +60,12 @@ final class AccountPage extends Part {
 
     private void login() {
         if (!app.link.linked) { toast("后台还没启动好"); return; }
+        if (loggingIn) return;
+        loggingIn = true;
         toast("正在打开登录页…");
         bridge.post("/login", new JSONObject(), (status, data) -> {
+            loggingIn = false;
+            if (app.isFinishing() || app.isDestroyed()) return;
             if (status != 200) {
                 toast("没能开始登录：" + data.optString("error", "HTTP " + status));
                 return;
@@ -127,14 +133,16 @@ final class AccountPage extends Part {
         boolean has = "apiKey".equals(account().optString("method"));
         Dialog sheet = sheets.sheet("Gemini API Key", has ? "已经填过；填新的会替换它" : "在 Google AI Studio 里创建。填了以后，agy 用这个 Key 而不是 Google 账号");
         EditText key = sheets.field(sheet, "API Key", "", has ? "（不改就留空）" : "AIza…");
-        TextView remove = sheets.button(has ? "删除" : "取消", false, v -> {
+        TextView remove = sheets.button(has ? "删除" : "取消", false, null);
+        TextView ok = sheets.button("保存", true, null);
+        remove.setOnClickListener(v -> {
             if (!has) { sheet.dismiss(); return; }
-            saveKey("", sheet);
+            saveKey("", sheet, remove, ok);
         });
-        TextView ok = sheets.button("保存", true, v -> {
+        ok.setOnClickListener(v -> {
             String k = key.getText().toString().trim();
             if (k.isEmpty()) { sheet.dismiss(); return; }
-            saveKey(k, sheet);
+            saveKey(k, sheet, remove, ok);
         });
         ok.setBackground(Ui.press(app, Ui.round(col(R.color.text), dp(10)), dp(10)));
         ok.setTextColor(col(R.color.bg));
@@ -143,8 +151,13 @@ final class AccountPage extends Part {
         sheet.show();
     }
 
-    private void saveKey(String key, Dialog sheet) {
+    private void saveKey(String key, Dialog sheet, TextView remove, TextView ok) {
+        remove.setEnabled(false);
+        ok.setEnabled(false);
         bridge.post("/auth", obj("provider", "gemini", "key", key), (status, data) -> {
+            remove.setEnabled(true);
+            ok.setEnabled(true);
+            if (app.isFinishing() || app.isDestroyed()) return;
             if (status != 200) { toast("保存失败：" + data.optString("error", "HTTP " + status)); return; }
             toast(key.isEmpty() ? "已删除" : "已保存");
             sheet.dismiss();
@@ -154,8 +167,9 @@ final class AccountPage extends Part {
 
     /** The bridge reads agy's models again a moment after a sign-in: asked a few times until it has. */
     void refreshConfig(int tries) {
+        if (app.isFinishing() || app.isDestroyed()) return;
         bridge.get("/config", (status, data) -> {
-            if (status != 200) return;
+            if (status != 200 || app.isFinishing() || app.isDestroyed()) return;
             int before = agent.claudeModels.length();
             agent.applyConfig(data);
             app.settings.refreshSettings();

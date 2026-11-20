@@ -43,6 +43,7 @@ final class Md {
     private final Consumer<String> openLink;
     /** A picture's path in the userland (absolute, ~/…, or from the conversation's folder) as a file. */
     private final java.util.function.Function<String, java.io.File> files;
+    private final java.util.WeakHashMap<TextView, View.OnLayoutChangeListener> pendingLayouts = new java.util.WeakHashMap<>();
 
     Md(Context c, Consumer<String> copy, Consumer<String> openLink, java.util.function.Function<String, java.io.File> files) {
         this.c = c;
@@ -111,7 +112,7 @@ final class Md {
                 out.add(new String[]{"image", picture.group(2), picture.group(1)});
                 continue;
             }
-            if (lines[i].contains("|") && i + 1 < lines.length && lines[i + 1].contains("-")
+            if (lines[i].contains("|") && i + 1 < lines.length && lines[i + 1].contains("-") && lines[i + 1].contains("|")
                     && TABLE_RULE.matcher(lines[i + 1]).matches()) {
                 StringBuilder table = new StringBuilder(lines[i]).append('\n').append(lines[i + 1]);
                 int j = i + 2;
@@ -123,7 +124,7 @@ final class Md {
                 continue;
             }
             Matcher m = FENCE.matcher(lines[i]);
-            if (!m.matches()) {
+            if (!m.matches() || (m.group(1).startsWith("`") && lines[i].substring(m.end(1)).contains("`"))) {
                 prose.append(lines[i]).append('\n');
                 continue;
             }
@@ -157,7 +158,14 @@ final class Md {
             if (old != null && p[0].equals(old.getTag())) {
                 if ("code".equals(p[0])) updateCode(old, p[1], p[2]);
                 else if ("table".equals(p[0])) fillTable(old, p[1]);
-                else if ("image".equals(p[0])) { if (!p[1].equals(old.getTag(R.id.markdown))) { box.removeViewAt(i); box.addView(picture(p[1], p[2]), i); } }
+                else if ("image".equals(p[0])) {
+                    if (!p[1].equals(old.getTag(R.id.markdown))) {
+                        box.removeViewAt(i);
+                        View v = picture(p[1], p[2]);
+                        if (i > 0) Ui.margins(v, c, 0, 14, 0, 0);
+                        box.addView(v, i);
+                    }
+                }
                 else setProse((TextView) old, p[1]);
                 continue;
             }
@@ -195,15 +203,21 @@ final class Md {
         t.setTag(R.id.font, fontGen);
         t.setTypeface(Fonts.body(c));
         markwon.setMarkdown(t, md);
-        if (t.getWidth() == 0 && md.contains("|")) {
+        if (t.getWidth() == 0 && md.contains("|") && !pendingLayouts.containsKey(t)) {
             // Tables size their columns from the text's width: render again once that is known.
-            t.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            View.OnLayoutChangeListener l = new View.OnLayoutChangeListener() {
                 @Override public void onLayoutChange(View v, int l, int top, int r, int b, int ol, int ot, int or, int ob) {
                     if (r - l == 0) return;
                     t.removeOnLayoutChangeListener(this);
-                    t.post(() -> markwon.setMarkdown(t, (String) t.getTag(R.id.markdown)));
+                    pendingLayouts.remove(t);
+                    t.post(() -> {
+                        String cur = (String) t.getTag(R.id.markdown);
+                        if (cur != null) markwon.setMarkdown(t, cur);
+                    });
                 }
-            });
+            };
+            pendingLayouts.put(t, l);
+            t.addOnLayoutChangeListener(l);
         }
     }
 

@@ -59,14 +59,20 @@ final class AppPage extends Part {
             clear(userland.file("/tmp"));
             clear(userland.file(Userland.HOME + "/.cache"));
         }));
-        sheets.option(clean, R.drawable.ic_trash, "清空对话记录", null, true, () -> confirm("清空对话记录", "所有对话都会被删除，不能恢复", true, () -> {
+        sheets.option(clean, R.drawable.ic_trash, "清空对话记录", null, true, () -> confirmAsync("清空对话记录", "所有对话都会被删除，不能恢复", true, () -> {
+            if (!app.link.linked) { toast("还没连上后台"); return; }
             // By the bridge: agy keeps its list of them, and is stopped while they go.
-            ui.post(() -> bridge.post("/delete-all", new org.json.JSONObject(), (status, data) -> {
+            bridge.post("/delete-all", new org.json.JSONObject(), (status, data) -> {
+                if (app.isFinishing() || app.isDestroyed()) return;
                 if (status != 200) { toast("没能清空：" + data.optString("error", "HTTP " + status)); return; }
+                app.chats.clear();
+                app.bySession.clear();
+                app.switchTo(app.newChat());
                 app.drawer.keepSessions(new JSONArray());
                 app.drawer.loadSessions();
+                toast("完成");
                 measureStorage();
-            }));
+            });
         }));
     }
 
@@ -77,14 +83,22 @@ final class AppPage extends Part {
 
     /** Asks before doing something that cannot be undone; does it off the main thread. */
     private void confirm(String title, String what, boolean danger, Runnable action) {
+        confirmAsync(title, what, danger, () -> work.execute(() -> {
+            action.run();
+            ui.post(() -> {
+                if (app.isFinishing() || app.isDestroyed()) return;
+                toast("完成");
+                measureStorage();
+            });
+        }));
+    }
+
+    private void confirmAsync(String title, String what, boolean danger, Runnable action) {
         Dialog sheet = sheets.sheet(title, what);
         TextView cancel = sheets.button("取消", false, v -> sheet.dismiss());
         TextView ok = sheets.button("确定", true, v -> {
             sheet.dismiss();
-            work.execute(() -> {
-                action.run();
-                ui.post(() -> { toast("完成"); measureStorage(); });
-            });
+            action.run();
         });
         if (danger) ok.setBackground(Ui.press(app, Ui.round(col(R.color.danger), dp(10)), dp(10)));
         sheets.actions(sheet, cancel, ok);

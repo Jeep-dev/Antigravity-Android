@@ -38,14 +38,15 @@ final class ExtPage extends Part {
     void rawSheet(java.io.File f, String empty) {
         String text = f.exists() ? agent.readFile(f) : empty;
         sheets.textSheet(f.getName(), text, "{ }", true, (t, done) -> {
+            String out = t.trim().isEmpty() ? "{}" : t;
             try {
-                new JSONObject(t.trim().isEmpty() ? "{}" : t);
+                new JSONObject(out);
             } catch (JSONException e) {
                 toast("不是有效的 JSON：" + e.getMessage());
                 return;
             }
             try {
-                Userland.replace(f, t.endsWith("\n") ? t : t + "\n");
+                Userland.replace(f, out.endsWith("\n") ? out : out + "\n");
             } catch (Exception e) {
                 toast("保存失败：" + e.getMessage());
                 return;

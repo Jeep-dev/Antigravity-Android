@@ -19,7 +19,8 @@ final class DrawerFrame extends FrameLayout {
     private final View main, scrim, drawer;
     private final int slop;
     private float downX, downY, startOffset;
-    private boolean dragging, decided;
+    private boolean dragging, decided, open;
+    private int activePointerId = MotionEvent.INVALID_POINTER_ID;
     private float offset; // 0 closed … 1 open
     private VelocityTracker velocity;
     private ValueAnimator anim;
@@ -39,6 +40,7 @@ final class DrawerFrame extends FrameLayout {
         addView(scrim, new LayoutParams(-1, -1));
         addView(drawer, new LayoutParams(-2, -1));
         drawer.setElevation(Ui.dp(c, 12));
+        drawer.setVisibility(INVISIBLE);
         post(() -> apply(offset));
     }
 
@@ -53,7 +55,19 @@ final class DrawerFrame extends FrameLayout {
     /** Open at once, without moving: a screen built again where it was open. */
     void openNow() {
         if (anim != null) anim.cancel();
+        open = true;
         apply(1);
+    }
+
+    @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
+        super.onSizeChanged(w, h, ow, oh);
+        post(() -> apply(offset));
+    }
+
+    @Override protected void onDetachedFromWindow() {
+        if (anim != null) { anim.cancel(); anim = null; }
+        if (velocity != null) { velocity.recycle(); velocity = null; }
+        super.onDetachedFromWindow();
     }
 
     private int width() {
@@ -78,7 +92,8 @@ final class DrawerFrame extends FrameLayout {
 
     private void animateTo(float target) {
         if (anim != null) anim.cancel();
-        boolean opening = target > offset;
+        boolean opening = target > 0.5f && !open;
+        open = target > 0.5f;
         anim = ValueAnimator.ofFloat(offset, target);
         anim.setDuration((long) (Motion.PAGE * Math.max(0.35f, Math.abs(target - offset))));
         anim.setInterpolator(Motion.EMPHASIZED);
@@ -117,24 +132,29 @@ final class DrawerFrame extends FrameLayout {
     }
 
     private void down(MotionEvent e) {
-        downX = e.getX();
-        downY = e.getY();
+        activePointerId = e.getPointerId(0);
+        downX = e.getX(0);
+        downY = e.getY(0);
         decided = false;
         dragging = false;
     }
 
     /** After the first movement past the touch slop: is this a drawer swipe? */
     private boolean decide(MotionEvent e) {
-        float dx = e.getX() - downX, dy = e.getY() - downY;
+        int idx = e.findPointerIndex(activePointerId);
+        if (idx < 0) return false;
+        float x = e.getX(idx), y = e.getY(idx);
+        float dx = x - downX, dy = y - downY;
         if (Math.abs(dx) < slop && Math.abs(dy) < slop) return false;
         decided = true;
         boolean sideways = Math.abs(dx) > Math.abs(dy) * 1.3f;
-        boolean open = isOpen();
-        if (!sideways || (!open && dx < 0) || (open && dx > 0)) return false;
-        if (!open && scrollsSideways(main, downX, downY, -1)) return false;
+        boolean isOpen = isOpen();
+        if (!sideways || (!isOpen && dx < 0) || (isOpen && dx > 0)) return false;
+        if (!isOpen && scrollsSideways(main, downX, downY, -1)) return false;
+        if (isOpen && scrollsSideways(drawer, downX, downY, 1)) return false;
         dragging = true;
         startOffset = offset;
-        downX = e.getX();
+        downX = x;
         return true;
     }
 
@@ -147,15 +167,28 @@ final class DrawerFrame extends FrameLayout {
         if (velocity == null) velocity = VelocityTracker.obtain();
         velocity.addMovement(e);
         switch (e.getActionMasked()) {
-            case MotionEvent.ACTION_MOVE:
-                apply(startOffset + (e.getX() - downX) / width());
+            case MotionEvent.ACTION_MOVE: {
+                int idx = e.findPointerIndex(activePointerId);
+                if (idx >= 0) apply(startOffset + (e.getX(idx) - downX) / width());
                 return true;
+            }
+            case MotionEvent.ACTION_POINTER_UP: {
+                int idx = e.getActionIndex();
+                if (e.getPointerId(idx) == activePointerId && e.getPointerCount() > 1) {
+                    int next = idx == 0 ? 1 : 0;
+                    activePointerId = e.getPointerId(next);
+                    downX = e.getX(next);
+                    startOffset = offset;
+                }
+                return true;
+            }
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL: {
                 velocity.computeCurrentVelocity(1000);
-                float v = velocity.getXVelocity();
+                float v = activePointerId != MotionEvent.INVALID_POINTER_ID ? velocity.getXVelocity(activePointerId) : velocity.getXVelocity();
                 velocity.recycle();
                 velocity = null;
+                activePointerId = MotionEvent.INVALID_POINTER_ID;
                 dragging = false;
                 float fling = Ui.dp(getContext(), 400);
                 animateTo(v > fling ? 1 : v < -fling ? 0 : offset > 0.5f ? 1 : 0);

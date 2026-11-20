@@ -91,6 +91,8 @@ final class Skills extends Part {
                     toast("新建失败：" + e.getMessage());
                     return;
                 }
+                agent.relaunch();
+                app.settings.refreshSettings();
                 done.run();
                 editSkill(f.getParentFile());
             }, null);

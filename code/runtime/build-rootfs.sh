@@ -7,7 +7,7 @@ ARCH=$1
 OUT=$(realpath "$2")
 ALPINE=3.24
 ALPINE_RELEASE=3.24.2
-PACKAGES="bash python3 git ripgrep fd libgcc libstdc++ curl less ca-certificates"
+PACKAGES="bash python3 git ripgrep fd libgcc libstdc++ curl less ca-certificates tzdata"
 MIRROR=https://dl-cdn.alpinelinux.org/alpine
 # What the app's apk installs from later (fast from China, works anywhere).
 APP_MIRROR=https://mirrors.aliyun.com/alpine
@@ -52,7 +52,8 @@ if not arch:
 def get(url):
     return urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'agy-update'}), timeout=60)
 try:
-    manifest = json.load(get('%s/manifests/linux_%s_musl.json' % (BASE, arch)))
+    with get('%s/manifests/linux_%s_musl.json' % (BASE, arch)) as r:
+        manifest = json.load(r)
     url, sha512 = manifest['url'], manifest['sha512']
 except Exception as e:
     sys.exit('agy-update: the release manifest could not be read: %s' % e)
@@ -76,7 +77,7 @@ except Exception as e:
     os.path.exists(download) and os.remove(download)
     sys.exit('agy-update: download failed: %s' % e)
 print('verify', flush=True)
-if digest.hexdigest() != sha512:
+if digest.hexdigest() != sha512.strip().lower():
     os.remove(download)
     sys.exit('agy-update: the download does not match its checksum; nothing was installed')
 print('unpack', flush=True)

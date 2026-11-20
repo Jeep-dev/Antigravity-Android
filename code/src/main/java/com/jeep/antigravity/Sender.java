@@ -40,9 +40,7 @@ final class Sender extends Part {
 
         @Override public void sendNow(Chat.Queued q) {
             Chat chat = app.current;
-            // With agy already: stopping the reply is enough, it then starts a turn for it.
-            if (q.inserted) { if (chat.running) stop(chat); app.renderNow(); return; }
-            chat.queue.remove(q);
+            if (!chat.queue.remove(q)) return;
             chat.queue.add(0, q);
             q.now = true;
             if (chat.running) stop(chat);
@@ -177,12 +175,20 @@ final class Sender extends Part {
 
     /** Saves non-picture files into the working folder one by one, then sends. */
     private void upload(Chat chat, List<Chat.Attachment> attached, int from, List<String> saved, String text, Chat.Queued inserted) {
+        if (inserted != null && (!inserted.inserted || !chat.queue.contains(inserted))) return;
+        if (inserted != null && !chat.running) {
+            inserted.inserted = false;
+            inserted.uuid = null;
+            sendQueued(chat);
+            return;
+        }
         int i = from;
         while (i < attached.size() && attached.get(i).image) i++;
         if (i >= attached.size()) { deliver(chat, attached, saved, text, inserted); return; }
         Chat.Attachment f = attached.get(i);
         int next = i + 1;
         bridge.upload(chat.cwd, f.name, f.uri, (status, data) -> {
+            if (inserted != null && (!inserted.inserted || !chat.queue.contains(inserted))) return;
             if (status != 200) {
                 String why = f.name + " 没能存到 " + Ui.base(chat.cwd) + "：" + data.optString("error", String.valueOf(status));
                 if (inserted != null) notInserted(chat, inserted, why);
@@ -195,6 +201,13 @@ final class Sender extends Part {
     }
 
     private void deliver(Chat chat, List<Chat.Attachment> attached, List<String> saved, String text, Chat.Queued inserted) {
+        if (inserted != null && (!inserted.inserted || !chat.queue.contains(inserted))) return;
+        if (inserted != null && !chat.running) {
+            inserted.inserted = false;
+            inserted.uuid = null;
+            sendQueued(chat);
+            return;
+        }
         JSONArray content = new JSONArray();
         for (Chat.Attachment a : attached) {
             if (!a.image) continue;
@@ -208,26 +221,33 @@ final class Sender extends Part {
         }
         if (full.length() > 0) content.put(obj("type", "text", "text", full.toString()));
         long sentAt = System.currentTimeMillis();
+        String mid = inserted != null ? inserted.uuid : java.util.UUID.randomUUID().toString();
         JSONObject body = obj("chat", chat.key, "sessionId", chat.sessionId, "cwd", chat.cwd,
                 "model", agent.model.isEmpty() ? null : agent.model, "effort", agent.effort.isEmpty() ? null : agent.effort,
                 "mode", agent.mode.isEmpty() ? null : agent.mode,
-                "content", content, "mid", chat.key + ":" + sentAt,
+                "content", content, "mid", mid,
                 "uuid", inserted != null ? inserted.uuid : null);
         sendWithRetry(chat, body, sentAt, 0, inserted);
     }
 
     /** The answer may be lost with the message delivered: the bridge ignores a repeated mid. */
     private void sendWithRetry(Chat chat, JSONObject body, long sentAt, int attempt, Chat.Queued inserted) {
+        if (inserted != null && (!inserted.inserted || !chat.queue.contains(inserted))) return;
         bridge.post("/send", body, (status, data) -> {
             if (status == 200) return;
+            if (inserted != null && (!inserted.inserted || !chat.queue.contains(inserted))) return;
             if (status < 0 && attempt < 2) {
-                ui.postDelayed(() -> sendWithRetry(chat, body, sentAt, attempt + 1, inserted), 1200);
+                ui.postDelayed(() -> {
+                    if (app.isFinishing() || app.isDestroyed()) return;
+                    sendWithRetry(chat, body, sentAt, attempt + 1, inserted);
+                }, 1200);
                 return;
             }
             if (inserted != null) {
-                // Refused for sure: it waits for the reply instead. No answer: it may have gone (the
-                // reply runs on regardless), so it is not sent twice.
-                if (status >= 400 || status == Bridge.REFUSED) notInserted(chat, inserted, data.optString("error", String.valueOf(status)));
+                // Refused for sure (or the turn already ended): it waits for the reply instead.
+                if (status >= 400 || status == Bridge.REFUSED || !chat.running) {
+                    notInserted(chat, inserted, data.optString("error", String.valueOf(status)));
+                }
                 return;
             }
             if (chat.lastEvent > sentAt) return; // it is running after all
@@ -237,7 +257,18 @@ final class Sender extends Part {
 
     void fail(Chat chat, String titleText, String text) {
         chat.running = false;
-        Chat.Msg m = chat.reply(true);
+        chat.stopping = false;
+        Chat.Msg m = null;
+        for (Chat.Msg x : chat.messages) {
+            if (x.kind != Chat.Msg.ASSISTANT || x.done) continue;
+            if (m != null) { m.done = true; m.touch(); }
+            m = x;
+            for (Chat.Block b : x.blocks) {
+                if (b.kind == Chat.Block.TOOL && (b.running || b.ask != null)) { b.running = false; b.ask = null; b.touch(); }
+                if (b.kind == Chat.Block.THINKING && b.streaming) { b.streaming = false; b.touch(); }
+            }
+        }
+        if (m == null) m = chat.reply(true);
         Chat.Block b = new Chat.Block(Chat.Block.ERROR);
         b.title = titleText;
         b.text = text == null ? "" : text;
@@ -261,9 +292,11 @@ final class Sender extends Part {
         }
         bridge.post("/permission", body, (status, data) -> {
             if (status == 200 || status == 409) return; // 409: not asked any more (the turn ended)
-            b.ask = request;
-            b.touch();
-            app.render();
+            if (chat.running && b.running) {
+                b.ask = request;
+                b.touch();
+                app.render();
+            }
             toast("没能回复：" + data.optString("error", String.valueOf(status)));
         });
     }

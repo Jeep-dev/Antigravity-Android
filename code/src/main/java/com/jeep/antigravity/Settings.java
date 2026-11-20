@@ -43,6 +43,7 @@ final class Settings extends Part {
 
     /** Opens Settings, a full-screen page (or refreshes it when open). */
     void settingsSheet() {
+        if (app.isFinishing() || app.isDestroyed()) return;
         if (settingsPage == null) {
             Dialog d = new Dialog(app, R.style.Page);
             // Its pages, one over another while they move.
@@ -120,7 +121,11 @@ final class Settings extends Part {
         if (settingsPage == null || !settingsMoving()) return;
         if (settingsAt != null) { settingsGo(null); return; }
         Dialog d = settingsPage;
-        Motion.pop(app.findViewById(android.R.id.content), settingsStage, d::dismiss);
+        Motion.pop(app.findViewById(android.R.id.content), settingsStage, () -> {
+            if (d.isShowing() && !app.isFinishing() && !app.isDestroyed()) {
+                try { d.dismiss(); } catch (IllegalArgumentException ignored) {}
+            }
+        });
     }
 
     private void settingsOpen(String page) {
@@ -143,12 +148,14 @@ final class Settings extends Part {
 
     /** Reads the options again and redraws Settings, if open. */
     void refreshSettings() {
-        if (settingsPage == null) return;
+        if (settingsPage == null || app.isFinishing() || app.isDestroyed()) return;
         if (!app.link.linked) { fillSettings(null); return; }
         // agy's version is found a moment after the bridge starts.
         bridge.get("/config", (st, config) -> {
+            if (settingsPage == null || app.isFinishing() || app.isDestroyed()) return;
             if (st == 200) agent.applyConfig(config);
             bridge.get("/launch", (status, launch) -> {
+                if (settingsPage == null || app.isFinishing() || app.isDestroyed()) return;
                 if (status == 200) launchCache = launch;
                 fillSettings(status == 200 ? launch : null);
             });
@@ -259,7 +266,7 @@ final class Settings extends Part {
         LinearLayout talk = card(box);
         sheets.choice(talk, "回复中发消息", new String[]{"排队", "插入"}, app.sender.insertWhileRunning() ? 1 : 0, i -> {
             prefs.edit().putBoolean("insertWhileRunning", i == 1).apply();
-            fillSettings(launchCache); // shown chosen
+            fillSettings(app.link.linked ? launchCache : null); // shown chosen
         });
         String folderNow = agent.cwd.isEmpty() ? agent.defaultCwd : agent.cwd;
         sheets.option(talk, R.drawable.ic_folder, "工作目录", folderNow.isEmpty() ? "~/work" : agent.tilde(folderNow), false, () -> {
@@ -282,8 +289,10 @@ final class Settings extends Part {
         LinearLayout memory = card(box);
         String folder = app.current.cwd == null || app.current.cwd.isEmpty() ? folderNow : app.current.cwd;
         sheets.option(memory, R.drawable.ic_book, "全局", "~/.gemini", false, () -> app.pickers.memorySheet("global", null, "AGENTS.md"));
-        sheets.option(memory, R.drawable.ic_book, Ui.base(folder), agent.tilde(folder), false,
-                () -> app.pickers.memorySheet("folder", folder, "AGENTS.md · " + Ui.base(folder)));
+        if (!folder.isEmpty()) {
+            sheets.option(memory, R.drawable.ic_book, Ui.base(folder), agent.tilde(folder), false,
+                    () -> app.pickers.memorySheet("folder", folder, "AGENTS.md · " + Ui.base(folder)));
+        }
     }
 
     /** The scrolling of the Settings page in front. */

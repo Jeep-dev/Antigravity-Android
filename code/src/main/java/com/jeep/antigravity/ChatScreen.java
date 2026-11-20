@@ -57,6 +57,12 @@ final class ChatScreen extends Part {
 
     /** The page, built (again after a restyle) for the layout in use. */
     View build() {
+        ui.removeCallbacks(hideJump);
+        host = null;
+        stage = null;
+        fadeTop = null;
+        fadeBottom = null;
+        topButtons = null;
         immersive = Themes.immersive(app);
         applyWindow();
 

@@ -59,7 +59,7 @@ final class Link extends Part {
             connecting = false;
             if ("ok".equals(result)) {
                 setup = null;
-                afterLink();
+                if (!linked) afterLink();
             } else if ("install".equals(result)) {
                 install();
             } else {
@@ -117,6 +117,7 @@ final class Link extends Part {
             if (bridgeStarted != 0 && started != bridgeStarted) {
                 // A new bridge: the old one's turns ended with it.
                 for (Chat ch : app.chats.values()) {
+                    ch.stopping = false;
                     if (ch.running) app.sender.fail(ch, "后台重启了", "这一轮被中断，发消息即可接着这个对话继续。");
                     ch.unhand(); // what the old one held waits here again
                 }

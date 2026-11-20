@@ -57,6 +57,7 @@ final class KeepAlive {
     /** What rish printed running the script, or null when it did not end within 20 s. */
     private static String rish(Userland userland, String script) {
         File out = null;
+        Process p = null;
         try {
             ProcessBuilder pb = new ProcessBuilder(userland.command("/usr/local/bin/rish", "-c", script));
             userland.env(pb);
@@ -64,7 +65,7 @@ final class KeepAlive {
             pb.redirectErrorStream(true);
             out = File.createTempFile("rish", null, userland.tmp);
             pb.redirectOutput(out);
-            Process p = pb.start();
+            p = pb.start();
             if (!p.waitFor(20, TimeUnit.SECONDS)) {
                 p.destroyForcibly();
                 return null;
@@ -76,6 +77,7 @@ final class KeepAlive {
             Thread.currentThread().interrupt();
             return null;
         } finally {
+            if (p != null && p.isAlive()) p.destroyForcibly();
             if (out != null) out.delete();
         }
     }

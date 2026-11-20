@@ -270,6 +270,9 @@ final class Chat {
             b = Block.tool(id, r.optString("tool_name"));
             m.blocks.add(b);
             m.touch();
+        } else {
+            String toolName = r.optString("tool_name");
+            if (!toolName.isEmpty()) b.name = toolName;
         }
         if (r.optJSONObject("input") != null) b.input = r.optJSONObject("input");
         b.ask = d.optString("request_id");
@@ -290,8 +293,8 @@ final class Chat {
                 running = true;
                 startedAt = System.currentTimeMillis();
             }
-            if (d.has("session_id")) sessionId = d.optString("session_id");
-            model = d.optString("model", model);
+            if (!d.isNull("session_id") && !d.optString("session_id").isEmpty()) sessionId = d.optString("session_id");
+            if (!d.isNull("model")) model = d.optString("model", model);
         } else if ("api_retry".equals(sub)) {
             // No HTTP status (null) means the connection itself failed, e.g. dropped mid-request;
             // agy then calls the error "unknown".
@@ -430,6 +433,8 @@ final class Chat {
     private void toolUse(Msg m, JSONObject c) {
         Block b = tool(c.optString("id"));
         if (b != null) {
+            String name = c.optString("name");
+            if (!name.isEmpty()) b.name = name;
             if (c.optJSONObject("input") != null) b.input = c.optJSONObject("input");
             b.touch();
         } else {
@@ -481,7 +486,7 @@ final class Chat {
         } else if (d.optBoolean("is_error")) {
             Block b = new Block(Block.ERROR);
             b.title = "请求失败";
-            b.text = d.optString("result", sub);
+            b.text = d.isNull("result") ? sub : d.optString("result", sub);
             m.blocks.add(b);
         }
         m.done = true;
@@ -490,7 +495,7 @@ final class Chat {
         running = handed();
         stopped = stopping || "error_during_execution".equals(sub);
         stopping = false;
-        if (d.has("session_id")) sessionId = d.optString("session_id");
+        if (!d.isNull("session_id") && !d.optString("session_id").isEmpty()) sessionId = d.optString("session_id");
         return true;
     }
 
@@ -561,7 +566,7 @@ final class Chat {
         b.toolId = o.optString("id");
         b.name = o.optString("name");
         b.input = o.optJSONObject("input") != null ? o.optJSONObject("input") : new JSONObject();
-        b.result = o.has("result") ? o.optString("result") : null;
+        b.result = !o.isNull("result") ? o.optString("result") : null;
         JSONArray imgs = o.optJSONArray("images");
         for (int n = 0; imgs != null && n < imgs.length(); n++) b.images.add(imgs.optString(n));
         b.error = o.optBoolean("isError");

@@ -43,8 +43,7 @@ final class Finder extends Part {
             // Counted in the texts the row's views show, in their order, as mark and findSpot count.
             int k = 0;
             for (String text : texts) {
-                String s = text.toLowerCase(Locale.ROOT);
-                for (int i = s.indexOf(findQuery); i >= 0; i = s.indexOf(findQuery, i + findQuery.length())) findHits.add(new int[]{p, k++});
+                for (int i = indexOfIgnoreCase(text, findQuery, 0); i >= 0; i = indexOfIgnoreCase(text, findQuery, i + findQuery.length())) findHits.add(new int[]{p, k++});
             }
         }
         if (findHits.isEmpty()) {
@@ -105,15 +104,15 @@ final class Finder extends Part {
         findTexts(row, texts);
         int n = 0;
         for (TextView t : texts) {
-            String s = t.getText().toString().toLowerCase(Locale.ROOT);
-            for (int i = s.indexOf(findQuery); i >= 0; i = s.indexOf(findQuery, i + findQuery.length())) {
+            String s = t.getText().toString();
+            for (int i = indexOfIgnoreCase(s, findQuery, 0); i >= 0; i = indexOfIgnoreCase(s, findQuery, i + findQuery.length())) {
                 if (n++ < k) continue;
                 android.text.Layout layout = t.getLayout();
                 if (layout == null) return -1;
                 int[] a = new int[2], b = new int[2];
                 t.getLocationInWindow(a);
                 app.screen.list.getLocationInWindow(b);
-                return a[1] - b[1] + t.getTotalPaddingTop() + layout.getLineTop(layout.getLineForOffset(i));
+                return a[1] - b[1] + t.getTotalPaddingTop() + layout.getLineTop(layout.getLineForOffset(Math.min(i, s.length())));
             }
         }
         return -1;
@@ -132,12 +131,23 @@ final class Finder extends Part {
             android.text.Spannable s = (android.text.Spannable) t.getText();
             for (Found f : s.getSpans(0, s.length(), Found.class)) s.removeSpan(f);
             if (!marked) continue;
-            String lower = s.toString().toLowerCase(Locale.ROOT);
-            for (int i = lower.indexOf(findQuery); i >= 0; i = lower.indexOf(findQuery, i + findQuery.length()), n++) {
+            String raw = s.toString();
+            int qlen = findQuery.length();
+            for (int i = indexOfIgnoreCase(raw, findQuery, 0); i >= 0; i = indexOfIgnoreCase(raw, findQuery, i + qlen), n++) {
                 boolean here = at != null && at[0] == position && at[1] == n;
                 s.setSpan(new Found(Glass.alpha(col(R.color.accent), here ? 0.55f : 0.2f)),
-                        i, Math.min(s.length(), i + findQuery.length()), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                        i, i + qlen, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
         }
+    }
+
+    /** Case-insensitive search keeping exact UTF-16 offsets (unlike toLowerCase, which can expand chars like İ). */
+    private static int indexOfIgnoreCase(String text, String query, int from) {
+        int qlen = query.length();
+        if (qlen == 0) return -1;
+        for (int i = Math.max(0, from), end = text.length() - qlen; i <= end; i++) {
+            if (text.regionMatches(true, i, query, 0, qlen)) return i;
+        }
+        return -1;
     }
 }

@@ -15,8 +15,8 @@ final class Toggle extends View {
     /** 0 off, 1 on; between while it moves. */
     private float at;
     /** 0 let go, 1 held: the thumb grows while its row is held. */
-    private float held;
-    private ValueAnimator holding;
+    private float held, holdTo;
+    private ValueAnimator holding, flipping;
 
     Toggle(Context c, boolean on) {
         super(c);
@@ -29,7 +29,8 @@ final class Toggle extends View {
     @Override protected void drawableStateChanged() {
         super.drawableStateChanged();
         float to = isPressed() ? 1 : 0;
-        if (holding == null && to == held) return;
+        if (to == holdTo) return;
+        holdTo = to;
         if (holding != null) holding.cancel();
         holding = ValueAnimator.ofFloat(held, to);
         holding.setDuration(120);
@@ -44,11 +45,18 @@ final class Toggle extends View {
     void flip() {
         on = !on;
         performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK);
-        ValueAnimator a = ValueAnimator.ofFloat(at, on ? 1 : 0);
-        a.setDuration(250);
-        a.setInterpolator(Motion.EMPHASIZED);
-        a.addUpdateListener(x -> { at = (float) x.getAnimatedValue(); invalidate(); });
-        a.start();
+        if (flipping != null) flipping.cancel();
+        flipping = ValueAnimator.ofFloat(at, on ? 1 : 0);
+        flipping.setDuration(250);
+        flipping.setInterpolator(Motion.EMPHASIZED);
+        flipping.addUpdateListener(x -> { at = (float) x.getAnimatedValue(); invalidate(); });
+        flipping.start();
+    }
+
+    @Override protected void onDetachedFromWindow() {
+        if (holding != null) { holding.cancel(); holding = null; }
+        if (flipping != null) { flipping.cancel(); flipping = null; }
+        super.onDetachedFromWindow();
     }
 
     @Override protected void onMeasure(int w, int h) {

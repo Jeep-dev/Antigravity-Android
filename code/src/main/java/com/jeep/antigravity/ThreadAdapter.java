@@ -93,6 +93,8 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
         List<Item> next = flatten(chat, Themes.showThinking(c));
         if (reset) {
             opened = null;
+            growing = null;
+            moving.clear();
             items = next;
             notifyDataSetChanged();
             return;
@@ -183,10 +185,16 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
         // reply text: when it may be rendered again while it streams
         long nextRender;
         boolean renderPending;
+        Runnable renderTask;
+        // expand/collapse animation state on this holder
+        android.animation.ValueAnimator resizeAnim;
+        android.view.ViewTreeObserver.OnPreDrawListener growListener;
+        Chat.Block movingBlock;
 
         Holder(LinearLayout box) {
             super(box);
             this.box = box;
+            box.setTag(R.id.markdown, this);
         }
     }
 
@@ -204,7 +212,10 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
     private void bind(Holder h, int position) {
         Item it = items.get(position);
         boolean same = h.item != null && h.item.id == it.id && h.item.type == it.type;
-        if (!same && opened == h.box) opened = null; // another row in its box now
+        if (!same) {
+            cancelHolderWork(h);
+            if (opened == h.box) opened = null; // another row in its box now
+        }
         h.item = it;
         if (same && it.type == TEXT) { // the same reply text, grown: update its views in place
             h.box.setPadding(0, Ui.dp(c, it.gap), 0, 0);
@@ -220,6 +231,7 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
             }
             return;
         }
+        cancelHolderWork(h);
         h.box.removeAllViews();
         h.box.setOnClickListener(null); // the status row's; a reused box must not keep it
         h.box.setClickable(false);
@@ -241,11 +253,39 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
         }
         if (it.block != null && it.block == growing) {
             growing = null;
-            grow(h.box, it.block);
+            grow(h, it.block);
+        }
+    }
+
+    private void cancelHolderWork(Holder h) {
+        if (h.renderTask != null) {
+            h.box.removeCallbacks(h.renderTask);
+            h.renderTask = null;
+        }
+        h.renderPending = false;
+        if (h.growListener != null) {
+            h.box.getViewTreeObserver().removeOnPreDrawListener(h.growListener);
+            h.growListener = null;
+        }
+        if (h.resizeAnim != null) {
+            android.animation.ValueAnimator a = h.resizeAnim;
+            h.resizeAnim = null;
+            a.cancel();
+        }
+        if (h.movingBlock != null) {
+            moving.remove(h.movingBlock);
+            h.movingBlock = null;
+        }
+        ViewGroup.LayoutParams lp = h.box.getLayoutParams();
+        if (lp != null && lp.height != ViewGroup.LayoutParams.WRAP_CONTENT) {
+            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+            h.box.setLayoutParams(lp);
         }
     }
 
     @Override public void onViewRecycled(@NonNull Holder h) {
+        cancelHolderWork(h);
+        h.item = null;
         statusRows.remove(h);
         if (opened == h.box) opened = null;
     }
@@ -260,13 +300,20 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
         if (!it.msg.done && now < h.nextRender) {
             if (!h.renderPending) {
                 h.renderPending = true;
-                h.box.postDelayed(() -> {
+                h.renderTask = () -> {
                     h.renderPending = false;
+                    h.renderTask = null;
                     if (h.item != null && h.item.type == TEXT) text(h, h.item);
-                }, h.nextRender - now);
+                };
+                h.box.postDelayed(h.renderTask, h.nextRender - now);
             }
             return;
         }
+        if (h.renderTask != null) {
+            h.box.removeCallbacks(h.renderTask);
+            h.renderTask = null;
+        }
+        h.renderPending = false;
         md.render(h.box, it.block.text);
         pressable(h.box, it.msg);
         if (marker != null && h.getBindingAdapterPosition() != RecyclerView.NO_POSITION) marker.mark(h.box, h.getBindingAdapterPosition());
@@ -454,37 +501,48 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
             return;
         }
         moving.add(b);
-        resize(box, from, to, () -> {
+        Holder holder = (Holder) box.getTag(R.id.markdown);
+        if (holder != null) holder.movingBlock = b;
+        android.animation.ValueAnimator a = resize(box, from, to, () -> {
+            if (holder != null) { holder.resizeAnim = null; holder.movingBlock = null; }
             moving.remove(b);
             b.open = false;
             changed.accept(row);
         });
+        if (holder != null) holder.resizeAnim = a;
     }
 
     /** A row just opened: built whole, it is drawn from its head's height down to that. */
-    private void grow(LinearLayout box, Chat.Block b) {
+    private void grow(Holder h, Chat.Block b) {
+        LinearLayout box = h.box;
         if (box.getChildCount() == 0) return;
         View head = box.getChildAt(0);
         turn(head, 0, 90);
         moving.add(b);
-        box.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener() {
+        h.movingBlock = b;
+        android.view.ViewTreeObserver.OnPreDrawListener listener = new android.view.ViewTreeObserver.OnPreDrawListener() {
             @Override public boolean onPreDraw() {
                 box.getViewTreeObserver().removeOnPreDrawListener(this);
+                h.growListener = null;
                 opened = box;
                 int to = box.getHeight(), from = head.getBottom() + box.getPaddingBottom();
-                if (to <= from) { moving.remove(b); return true; }
+                if (to <= from) { moving.remove(b); h.movingBlock = null; return true; }
                 for (int i = 1; i < box.getChildCount(); i++) {
                     View v = box.getChildAt(i);
                     v.setAlpha(0f);
                     v.animate().alpha(1f).setDuration(Motion.PAGE).setInterpolator(Motion.EMPHASIZED).start();
                 }
-                resize(box, from, to, () -> {
+                h.resizeAnim = resize(box, from, to, () -> {
+                    h.resizeAnim = null;
+                    h.movingBlock = null;
                     moving.remove(b);
                     changed.accept(box); // where it ends: the list follows it as an opened row
                 });
                 return false; // this frame was whole: the next starts at the head's height
             }
-        });
+        };
+        h.growListener = listener;
+        box.getViewTreeObserver().addOnPreDrawListener(listener);
     }
 
     /** The chevron at the head's end, turned from one angle to another. */
@@ -497,7 +555,7 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
     }
 
     /** A box's height moved from one to another, then back to its own (wrap_content). */
-    private static void resize(View box, int from, int to, Runnable end) {
+    private static android.animation.ValueAnimator resize(View box, int from, int to, Runnable end) {
         ViewGroup.LayoutParams p = box.getLayoutParams();
         p.height = from;
         box.setLayoutParams(p);
@@ -508,14 +566,17 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
             p.height = (int) x.getAnimatedValue();
             box.setLayoutParams(p);
         });
+        boolean[] cancelled = {false};
         a.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override public void onAnimationCancel(android.animation.Animator x) { cancelled[0] = true; }
             @Override public void onAnimationEnd(android.animation.Animator x) {
                 p.height = ViewGroup.LayoutParams.WRAP_CONTENT;
                 box.setLayoutParams(p);
-                end.run();
+                if (!cancelled[0]) end.run();
             }
         });
         a.start();
+        return a;
     }
 
     private static String thinkingLabel(Chat.Block b) {
@@ -1077,7 +1138,13 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
         h.box.addView(h.detail);
         h.box.setOnClickListener(v -> {
             Chat.Block b = streamingThinking();
-            if (b != null) toggle(b, h.box);
+            if (b == null || moving.contains(b)) return;
+            if (b.open) {
+                b.open = false;
+                changed.accept(h.box);
+            } else {
+                toggle(b, h.box);
+            }
         });
         statusRows.add(h);
         tick(h);

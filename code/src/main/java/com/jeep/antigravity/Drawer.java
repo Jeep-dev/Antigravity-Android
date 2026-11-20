@@ -218,10 +218,11 @@ final class Drawer extends Part {
 
     /** Asks the bridge which conversations contain the words being searched for. */
     private void searchText() {
+        if (app.isFinishing() || app.isDestroyed()) return;
         String q = search.trim();
         if (q.isEmpty() || !app.link.linked) return;
         bridge.get("/search?q=" + Uri.encode(q), (status, data) -> {
-            if (!q.equals(search.trim()) || status != 200) return;
+            if (app.isFinishing() || app.isDestroyed() || !q.equals(search.trim()) || status != 200) return;
             hits.clear();
             JSONArray a = data.optJSONArray("results");
             for (int i = 0; a != null && i < a.length(); i++) {
@@ -267,7 +268,7 @@ final class Drawer extends Part {
         String group = "";
         int shown = 0;
         // Only the working folder's (Settings → 外观 → 只显示当前目录): new conversations' folder, not its subfolders.
-        String here = onlyHere() ? agent.workFolder().replaceAll("/+$", "") : "";
+        String here = onlyHere() ? normPath(agent.workFolder()) : "";
         // Pinned ones first, under their own heading.
         java.util.Set<String> pins = pinned();
         List<JSONObject> ordered = new ArrayList<>();
@@ -279,7 +280,7 @@ final class Drawer extends Part {
         }
         for (JSONObject s : ordered) {
             String titleText = s.optString("title").isEmpty() ? "新对话" : s.optString("title"), folder = s.optString("cwd"), id = s.optString("id");
-            if (!here.isEmpty() && !folder.replaceAll("/+$", "").equals(here)) continue;
+            if (!here.isEmpty() && !normPath(folder).equals(here)) continue;
             boolean byName = titleText.toLowerCase(Locale.ROOT).contains(q) || folder.toLowerCase(Locale.ROOT).contains(q);
             if (!q.isEmpty() && !byName && !hits.containsKey(id)) continue;
             String g = pins.contains(id) ? "置顶" : group(s.optDouble("mtime"));
@@ -316,8 +317,10 @@ final class Drawer extends Part {
             if (!q.isEmpty() && !byName) { // found in what was said: show where
                 String snip = hits.get(id);
                 SpannableStringBuilder sb = new SpannableStringBuilder(snip);
-                int at = snip.toLowerCase(Locale.ROOT).indexOf(q);
-                if (at >= 0) sb.setSpan(new ForegroundColorSpan(col(R.color.text)), at, at + q.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                java.util.regex.Matcher hit = java.util.regex.Pattern.compile(
+                        java.util.regex.Pattern.quote(q),
+                        java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE).matcher(snip);
+                if (hit.find()) sb.setSpan(new ForegroundColorSpan(col(R.color.text)), hit.start(), hit.end(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                 meta.setText(sb);
                 meta.setEllipsize(TextUtils.TruncateAt.END);
             }
@@ -446,11 +449,17 @@ final class Drawer extends Part {
         if (app.screen.banner.getVisibility() != bannerShown) app.screen.banner.setVisibility(bannerShown);
         if (label.equals(shownLink)) return;
         shownLink = label;
-        int dot = app.link.linked ? R.color.ok : app.link.connecting ? R.color.text3 : R.color.danger;
+        int dot = app.link.linked ? R.color.ok : (app.link.connecting || app.link.installing) ? R.color.text3 : R.color.danger;
         linkDot.setBackground(Ui.round(col(dot), dp(4)));
         linkDot.setVisibility(app.link.linked ? View.GONE : View.VISIBLE);
         linkText.setPadding(app.link.linked ? 0 : dp(9), 0, 0, 0);
         linkText.setText(label);
         ((View) linkText.getParent()).setVisibility(label.isEmpty() ? View.INVISIBLE : View.VISIBLE);
+    }
+
+    private static String normPath(String p) {
+        if (p == null || p.isEmpty()) return "";
+        String s = p.replaceAll("/+$", "");
+        return s.isEmpty() ? "/" : s;
     }
 }

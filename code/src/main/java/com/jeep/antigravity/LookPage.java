@@ -180,6 +180,7 @@ final class LookPage extends Part {
         work.execute(() -> {
             List<Fonts.Choice> all = Fonts.choices(app, cjk);
             ui.post(() -> {
+                if (!sheet.isShowing() || app.isFinishing() || app.isDestroyed()) return;
                 card.removeAllViews();
                 String sample = cjk ? "  永字八法" : "  Aa";
                 for (Fonts.Choice f : all) {
@@ -216,20 +217,23 @@ final class LookPage extends Part {
                 return;
             }
             java.io.File out = new java.io.File(Fonts.dir(app), safe);
+            java.io.File tmp = new java.io.File(Fonts.dir(app), safe + ".tmp");
             String error = null;
             try (InputStream in = app.getContentResolver().openInputStream(uri)) {
                 if (in == null) throw new java.io.IOException("读不到文件");
                 Fonts.dir(app).mkdirs();
-                try (java.io.OutputStream o = new java.io.FileOutputStream(out)) {
+                try (java.io.OutputStream o = new java.io.FileOutputStream(tmp)) {
                     Userland.copy(in, o);
                 }
-                if (Typeface.createFromFile(out) == Typeface.DEFAULT) throw new java.io.IOException("不是可用的字体");
+                if (Typeface.createFromFile(tmp) == Typeface.DEFAULT) throw new java.io.IOException("不是可用的字体");
+                if (!tmp.renameTo(out)) throw new java.io.IOException("保存字体失败");
             } catch (Exception e) {
-                out.delete();
+                tmp.delete();
                 error = e.getMessage();
             }
             String err = error;
             ui.post(() -> {
+                if (app.isFinishing() || app.isDestroyed()) return;
                 if (err != null) { toast("导入失败：" + err); return; }
                 toast("已导入");
                 fontSheet(fontCjk);

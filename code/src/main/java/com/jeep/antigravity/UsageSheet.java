@@ -58,13 +58,19 @@ final class UsageSheet extends Part {
         plan.addView(waitingLine("正在读取…"));
 
         sheet.show();
-        loadPlan(plan);
+        loadPlan(sheet, plan);
 
         Chat chat = app.current;
         bridge.post("/context", obj("chat", chat.key, "sessionId", chat.sessionId), (status, data) -> {
+            if (!sheet.isShowing() || app.isFinishing() || app.isDestroyed()) return;
             context.removeAllViews();
-            JSONObject c = status == 200 && data != null ? data.optJSONObject("context") : null;
             stats.removeAllViews();
+            if (status != 200 || data == null) {
+                context.addView(waitingLine("读取失败：还没连上 agy"));
+                stats.addView(waitingLine("同上"));
+                return;
+            }
+            JSONObject c = data.optJSONObject("context");
             if (c == null) {
                 context.addView(waitingLine("这个对话在 agy 里还没打开：发一条消息后就能看到"));
                 stats.addView(waitingLine("同上"));
@@ -72,11 +78,13 @@ final class UsageSheet extends Part {
             }
             fillContext(context, c);
             if (c.optJSONObject("stats") != null) fillStats(stats, c.optJSONObject("stats"));
+            else stats.addView(waitingLine("暂无统计"));
         });
     }
 
-    private void loadPlan(LinearLayout plan) {
+    private void loadPlan(Dialog sheet, LinearLayout plan) {
         bridge.get("/usage", (status, data) -> {
+            if (!sheet.isShowing() || app.isFinishing() || app.isDestroyed()) return;
             plan.removeAllViews();
             if (status != 200 || data == null) { plan.addView(waitingLine("读取失败：还没连上 agy")); return; }
             String error = data.optString("error");
@@ -90,7 +98,12 @@ final class UsageSheet extends Part {
     // ---- 上下文 ----
 
     private void fillContext(LinearLayout card, JSONObject c) {
-        long total = c.optLong("totalTokens"), max = Math.max(1, c.optLong("maxTokens"));
+        long total = Math.max(0, c.optLong("totalTokens")), rawMax = c.optLong("maxTokens");
+        if (rawMax <= 0) {
+            card.addView(waitingLine(total > 0 ? "已用 " + tokens(total) + "（窗口上限未知）" : "尚未上报上下文窗口"));
+            return;
+        }
+        long max = rawMax;
         int[] palette = Themes.dark(app) ? DARK : LIGHT;
 
         // The headline: the share of the window in use, and how much of how much.
@@ -182,10 +195,11 @@ final class UsageSheet extends Part {
         if (t == null) t = new JSONObject();
         statRow(card, "输入", tokens(t.optLong("input")));
         statRow(card, "输出", tokens(t.optLong("output")));
+        if (t.optLong("thinking") > 0) statRow(card, "思考", tokens(t.optLong("thinking")));
         statRow(card, "缓存读取", tokens(t.optLong("cacheRead")));
         if (t.optLong("cacheWrite") > 0) statRow(card, "缓存写入", tokens(t.optLong("cacheWrite")));
         double cost = stats.optDouble("cost", 0);
-        statRow(card, "花费", cost <= 0 ? "—" : String.format(Locale.ROOT, cost < 0.01 ? "$%.4f" : "$%.2f", cost));
+        if (cost > 0) statRow(card, "花费", String.format(Locale.ROOT, cost < 0.01 ? "$%.4f" : "$%.2f", cost));
         statRow(card, "消息", stats.optInt("userMessages") + " 条提问 · " + stats.optInt("toolCalls") + " 次工具调用");
     }
 
@@ -229,11 +243,12 @@ final class UsageSheet extends Part {
     }
 
     private void limit(LinearLayout card, JSONObject l) {
-        double left = l.isNull("remaining") ? 1 : l.optDouble("remaining", 1);
-        int used = (int) Math.max(0, Math.min(100, Math.round(100 * (1 - left))));
+        boolean known = !l.isNull("remaining");
+        double left = known ? l.optDouble("remaining", 1) : 1;
+        int used = !known ? 0 : left <= 0 ? 100 : (int) Math.max(0, Math.min(99, Math.round(100 * (1 - left))));
         // The fill carries how near it is to running out; words say it too.
         int fill, state = 0;
-        if (used >= 100) { fill = R.color.danger; state = 2; }
+        if (known && left <= 0) { fill = R.color.danger; state = 2; }
         else if (used >= 80) { fill = R.color.warn; state = 1; }
         else fill = R.color.accent;
 
@@ -247,13 +262,13 @@ final class UsageSheet extends Part {
             s.setPadding(0, 0, dp(8), 0);
             head.addView(s);
         }
-        head.addView(Ui.text(app, "已用 " + used + "%", 14, R.color.text2));
+        head.addView(Ui.text(app, known ? "已用 " + used + "%" : "未知", 14, R.color.text2));
         card.addView(head, Ui.fill());
 
         int fillColor = Ui.color(app, fill);
         Segments meter = new Segments(app, 100, Glass.alpha(fillColor, 0.18f));
-        meter.add(used, fillColor);
-        meter.setContentDescription(name.getText() + " 已用 " + used + "%");
+        if (known) meter.add(used, fillColor);
+        meter.setContentDescription(name.getText() + (known ? " 已用 " + used + "%" : " 未知"));
         card.addView(meter, new LinearLayout.LayoutParams(-1, dp(8)));
         Ui.margins(meter, app, 0, 7, 0, 5);
         String resets = resets(l.optString("resetsAt"));
@@ -309,16 +324,17 @@ final class UsageSheet extends Part {
         return t;
     }
 
-    /** 1,234 → 1.2k, 1,000,000 → 1m. */
+    /** 1,234 → 1.2k, 1,000,000 → 1m, 1,048,576 → 1.05m. */
     static String tokens(long n) {
         if (n < 1000) return String.valueOf(n);
-        if (n < 1_000_000) return trim(n / 1000.0) + "k";
-        return trim(n / 1_000_000.0) + "m";
+        if (n < 999_950) return trim(n / 1000.0, 1) + "k";
+        return trim(n / 1_000_000.0, 2) + "m";
     }
 
-    private static String trim(double v) {
-        String s = String.format(Locale.ROOT, "%.1f", v);
-        return s.endsWith(".0") ? s.substring(0, s.length() - 2) : s;
+    private static String trim(double v, int places) {
+        String s = String.format(Locale.ROOT, places == 2 ? "%.2f" : "%.1f", v);
+        while (s.contains(".") && (s.endsWith("0") || s.endsWith("."))) s = s.substring(0, s.length() - 1);
+        return s;
     }
 
     /**
