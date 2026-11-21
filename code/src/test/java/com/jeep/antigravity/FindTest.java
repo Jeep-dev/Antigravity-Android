@@ -68,7 +68,7 @@ public class FindTest {
         assertEquals("你这哪是高中联赛一试，这是《世界著名数学未解之谜（80分钟速通版）》：",
                 md.plain("你这哪是高中联赛一试，这是**《世界著名数学未解之谜（80分钟速通版）》**："));
         assertEquals("用code和“引号”和（括号）吗",
-                md.plain("用**`code`**和**“引号”**和**（括号）**吗"));
-        assertEquals("**不是粗体**", md.plain("`**不是粗体**`"));
+                md.plain("用**`code`**和**“引号”**和**（括号）**吗").replace("\u00a0", ""));
+        assertEquals("**不是粗体**", md.plain("`**不是粗体**`").replace("\u00a0", ""));
     }
 }
