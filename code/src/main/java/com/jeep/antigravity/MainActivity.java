@@ -493,7 +493,23 @@ public final class MainActivity extends Activity implements Bridge.Events {
         toast("已复制");
     }
 
+    private static final java.util.regex.Pattern IMAGE_EXT = java.util.regex.Pattern.compile("(?i)\\.(png|jpe?g|webp|gif|bmp|heic|heif)$");
+
     void openUrl(String url) {
+        if (url != null && url.startsWith("file://")) {
+            String path = url.substring(7);
+            int hash = path.indexOf('#');
+            if (hash >= 0) path = path.substring(0, hash);
+            int q = path.indexOf('?');
+            if (q >= 0) path = path.substring(0, q);
+            if (IMAGE_EXT.matcher(path).find()) {
+                java.io.File f = userFile(path);
+                if (f != null && f.isFile()) {
+                    Images.show(this, null, f);
+                    return;
+                }
+            }
+        }
         try {
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
         } catch (RuntimeException e) {

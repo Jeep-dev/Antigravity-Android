@@ -34,6 +34,10 @@ final class Md {
     private static final Pattern TABLE_RULE = Pattern.compile("^\\s*\\|?\\s*:?-+:?\\s*(\\|\\s*:?-*:?\\s*)*\\|?\\s*$");
     /** A line that is only a picture: ![alt](where "title") */
     private static final Pattern IMAGE = Pattern.compile("^\\s*!\\[([^\\]]*)\\]\\(\\s*<?([^)>\\s]+)>?(?:\\s+[\"'][^\"']*[\"'])?\\s*\\)\\s*$");
+    /** An inline picture inside a line: ![alt](where "title") */
+    private static final Pattern INLINE_IMAGE = Pattern.compile("!\\[([^\\]]*)\\]\\(\\s*<?([^)>\\s]+)>?(?:\\s+[\"'][^\"']*[\"'])?\\s*\\)");
+    /** A local image link inside prose: [label](file:///.../foo.png) */
+    private static final Pattern FILE_IMAGE_LINK = Pattern.compile("(?<!\\!)\\[([^\\]]*)\\]\\(\\s*<?(file://[^)>\\s#?]+\\.(?i:png|jpe?g|webp|gif|bmp|heic|heif)(?:[#?][^)>\\s]*)?)>?(?:\\s+[\"'][^\"']*[\"'])?\\s*\\)");
 
     private final Context c;
     private Markwon markwon;
@@ -126,6 +130,22 @@ final class Md {
             Matcher m = FENCE.matcher(lines[i]);
             if (!m.matches() || (m.group(1).startsWith("`") && lines[i].substring(m.end(1)).contains("`"))) {
                 prose.append(lines[i]).append('\n');
+                if (lines[i].contains("![") || lines[i].contains("file://")) {
+                    List<String[]> found = new ArrayList<>();
+                    if (lines[i].contains("![")) {
+                        Matcher im = INLINE_IMAGE.matcher(lines[i]);
+                        while (im.find()) found.add(new String[]{"image", im.group(2), im.group(1)});
+                    }
+                    if (lines[i].contains("file://")) {
+                        Matcher fm = FILE_IMAGE_LINK.matcher(lines[i]);
+                        while (fm.find()) found.add(new String[]{"image", fm.group(2), fm.group(1), "link"});
+                    }
+                    if (!found.isEmpty()) {
+                        if (prose.toString().trim().length() > 0) out.add(new String[]{"text", prose.toString()});
+                        prose.setLength(0);
+                        out.addAll(found);
+                    }
+                }
                 continue;
             }
             String fence = m.group(1);
@@ -161,7 +181,7 @@ final class Md {
                 else if ("image".equals(p[0])) {
                     if (!p[1].equals(old.getTag(R.id.markdown))) {
                         box.removeViewAt(i);
-                        View v = picture(p[1], p[2]);
+                        View v = picture(p[1], p[2], p.length > 3);
                         if (i > 0) Ui.margins(v, c, 0, 14, 0, 0);
                         box.addView(v, i);
                     }
@@ -171,7 +191,7 @@ final class Md {
             }
             while (box.getChildCount() > i) box.removeViewAt(i);
             View v = "code".equals(p[0]) ? code(p[1], p[2]) : "table".equals(p[0]) ? table(p[1])
-                    : "image".equals(p[0]) ? picture(p[1], p[2]) : prose(p[1]);
+                    : "image".equals(p[0]) ? picture(p[1], p[2], p.length > 3) : prose(p[1]);
             if (i > 0) Ui.margins(v, c, 0, 14, 0, 0);
             box.addView(v);
         }
@@ -333,7 +353,7 @@ final class Md {
      * A picture in the reply: a file Claude made or a web address; a tap shows it whole. One on the
      * web is fetched only when tapped: what a reply shows must not send what Claude read anywhere.
      */
-    private View picture(String where, String alt) {
+    private View picture(String where, String alt, boolean optional) {
         LinearLayout box = Ui.column(c);
         box.setTag("image");
         box.setTag(R.id.markdown, where);
@@ -351,17 +371,30 @@ final class Md {
             ask.addView(name);
             ask.setOnClickListener(v -> {
                 box.removeAllViews();
-                show(box, where, where, null, alt);
+                show(box, where, where, null, alt, false);
             });
             box.addView(ask, Ui.wrap());
             return box;
         }
         boolean data = where.startsWith("data:");
-        show(box, where, data ? where : null, data ? null : files.apply(where.startsWith("file://") ? where.substring(7) : where), alt);
+        java.io.File file = null;
+        if (!data) {
+            String path = where.startsWith("file://") ? where.substring(7) : where;
+            int hash = path.indexOf('#');
+            if (hash >= 0) path = path.substring(0, hash);
+            int q = path.indexOf('?');
+            if (q >= 0) path = path.substring(0, q);
+            file = files.apply(path);
+            if (optional && (file == null || !file.isFile())) {
+                box.setVisibility(View.GONE);
+                return box;
+            }
+        }
+        show(box, where, data ? where : null, file, alt, optional);
         return box;
     }
 
-    private void show(LinearLayout box, String where, String src, java.io.File file, String alt) {
+    private void show(LinearLayout box, String where, String src, java.io.File file, String alt, boolean optional) {
         ImageView img = new ImageView(c);
         img.setAdjustViewBounds(true);
         img.setScaleType(ImageView.ScaleType.FIT_START);
@@ -373,6 +406,10 @@ final class Md {
         box.addView(img, Ui.wrap());
         Images.load(img, src, file, c.getResources().getDisplayMetrics().widthPixels, () -> {
             box.removeAllViews();
+            if (optional) {
+                box.setVisibility(View.GONE);
+                return;
+            }
             TextView t = Ui.text(c, "图片打不开：" + where, 13, R.color.text3);
             t.setTypeface(Ui.MONO);
             box.addView(t);
