@@ -933,6 +933,7 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
                 break;
             }
             case "Read": body.addView(io(b.name, i.optString("file_path"), R.color.text)); break;
+            case "WebSearch": body.addView(io(b.name, i.optString("query"), R.color.text)); break;
             case "Edit": {
                 body.addView(io(b.name, i.optString("file_path"), R.color.text));
                 MaxScroll shown = diff(i.optString("old_string"), i.optString("new_string"));

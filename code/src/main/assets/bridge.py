@@ -34,7 +34,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlparse
 
-VERSION = 5  # Bridge VERSION in the app: an app update replaces an older running bridge
+VERSION = 6  # Bridge VERSION in the app: an app update replaces an older running bridge
 HOME = os.path.expanduser('~')
 GEMINI_DIR = os.path.join(HOME, '.gemini')
 AGY_DIR = os.environ.get('AGY_DATA_DIR') or os.path.join(GEMINI_DIR, 'antigravity-cli')
@@ -732,7 +732,10 @@ def tool_view(u):
             return 'Write', {'file_path': path, 'content': args.get('CodeContent') or args.get('Content') or ''}
         return 'Edit', {'file_path': path, 'old_string': args.get('Target') or '', 'new_string': args.get('Replacement') or ''}
     if kind == 'search':
-        query = next((args.get(k) for k in ('Query', 'Pattern', 'SearchPattern', 'Pattern') if isinstance(args.get(k), str)), '')
+        query = next((args.get(k) for k in ('Query', 'query', 'Pattern', 'SearchPattern') if isinstance(args.get(k), str)), '')
+        if name == 'search_web' or (not path and ('query' in args or title.endswith(' on Web'))):
+            clean = query or re.sub(r'^"(.*)" on Web$', r'\1', title)
+            return 'WebSearch', {'query': clean}
         return 'Grep', {'pattern': query or title, 'path': path}
     if kind == 'fetch':
         url = next((args.get(k) for k in ('Url', 'URL', 'url') if isinstance(args.get(k), str)), '')
@@ -2569,7 +2572,7 @@ class VoiceDictator:
 
     def _on_screen_locked(self):
         sess = self.active
-        if sess is None or self.screen is None:
+        if sess is None or self.screen is None or not self.ready:
             return
         box, status, above, _ = self.screen.snapshot()
         sess['last_status'] = status
@@ -2577,11 +2580,10 @@ class VoiceDictator:
         if 'Recording' in status and not sess['recording']:
             sess['recording'] = True
             hub.emit('', 'voice', {'id': sess['id'], 'state': 'recording'})
-        if box is not None and box != sess['last_text']:
-            if box or sess['recording']:
-                sess['last_text'] = box
-                if box and not sess['cancelled'].is_set():
-                    hub.emit('', 'voice', {'id': sess['id'], 'state': 'partial', 'text': box})
+        if (sess['recording'] or sess['finishing']) and box is not None and box != sess['last_text']:
+            sess['last_text'] = box
+            if box and not sess['cancelled'].is_set():
+                hub.emit('', 'voice', {'id': sess['id'], 'state': 'partial', 'text': box})
         if sess['finishing'] and 'Recording' not in status and 'Connecting' not in status and 'Finishing' not in status:
             sess['finished'].set()
 
@@ -2673,11 +2675,40 @@ class VoiceDictator:
         except AgyError as e:
             log('voice: warm failed: %s' % e)
 
+    def _wait_idle(self, timeout=3.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                if not self._alive() or self.screen is None:
+                    return False
+                _, status, _, _ = self.screen.snapshot()
+            if 'Recording' not in status and 'Connecting' not in status and 'Finishing' not in status:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _abort_active(self):
+        with self.lock:
+            fd = self.fd
+        if fd is not None:
+            try:
+                os.write(fd, b'\x1b')
+            except OSError:
+                pass
+        if not self._wait_idle(3.0):
+            self.stop('stuck after cancel')
+            return
+        self._clear_prompt()
+
     def _clear_prompt(self):
         with self.lock:
             fd = self.fd
             screen = self.screen
         if fd is None or screen is None:
+            return
+        with self.lock:
+            box, _, _, _ = screen.snapshot()
+        if not box:
             return
         try:
             os.write(fd, b'\x1f')  # Ctrl+_ undo dictation
@@ -2757,14 +2788,20 @@ class VoiceDictator:
 
             reader = threading.Thread(target=read_audio, daemon=True)
             reader.start()
+            with self.lock:
+                self.active = sess
             try:
                 hub.emit('', 'voice', {'id': vid, 'state': 'connecting'})
                 self.ensure(timeout=20)
                 if sess['cancelled'].is_set():
                     return {'ok': True, 'text': '', 'cancelled': True}
+                if not self._wait_idle(1.5):
+                    self._abort_active()
+                    self.ensure(timeout=20)
                 self._clear_prompt()
+                if sess['cancelled'].is_set():
+                    return {'ok': True, 'text': '', 'cancelled': True}
                 with self.lock:
-                    self.active = sess
                     fd = self.fd
                 if fd is None:
                     raise AgyError('语音听写进程已断开')
@@ -2776,10 +2813,8 @@ class VoiceDictator:
                             raise AgyError('语音听写进程意外退出')
                     time.sleep(0.05)
                 if sess['cancelled'].is_set():
-                    try:
-                        os.write(fd, b'\x1b')
-                    except OSError:
-                        pass
+                    sess['close_mic'].set()
+                    self._abort_active()
                     return {'ok': True, 'text': '', 'cancelled': True}
                 # Wait briefly for agy to connect & drain any buffered audio spoken while connecting
                 t_drain = time.time()
@@ -2788,10 +2823,8 @@ class VoiceDictator:
                 while not sess['pcm'].empty() and time.time() - t_drain < 4.0 and not sess['cancelled'].is_set():
                     time.sleep(0.05)
                 if bytes_in[0] < 3200:
-                    try:
-                        os.write(fd, b'\x1b')
-                    except OSError:
-                        pass
+                    sess['close_mic'].set()
+                    self._abort_active()
                     return {'ok': True, 'text': '', 'notice': '说话时间太短'}
                 hub.emit('', 'voice', {'id': vid, 'state': 'finishing'})
                 with self.lock:
@@ -2826,6 +2859,7 @@ class VoiceDictator:
                         raise AgyError('语音听写缺少授权：请先退出 Google 账号并重新登录')
                     if 'business' in notice.lower() or 'enterprise' in notice.lower():
                         raise AgyError('企业/商业版 Google 账号暂不支持 Antigravity 听写')
+                log('voice: done %s (%d chars)' % (vid, len(final_text)))
                 hub.emit('', 'voice', {'id': vid, 'state': 'done', 'text': final_text})
                 return {'ok': True, 'text': final_text, 'notice': notice}
             finally:

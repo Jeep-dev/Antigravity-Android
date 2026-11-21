@@ -406,7 +406,7 @@ final class Voice extends Part {
         android.widget.LinearLayout card = sheets.card(sheet);
         boolean agy = isAgy();
         String kept = agy || chosen() == null ? "" : prefs.getString("voiceService", "");
-        sheets.option(card, 0, "Antigravity 听写", "使用 Google 订阅 · 实时转写", false, () -> {
+        sheets.option(card, 0, "Antigravity 听写", "Google 订阅", false, () -> {
             cancel();
             prefs.edit().putString("voice", "agy").apply();
             warm();
