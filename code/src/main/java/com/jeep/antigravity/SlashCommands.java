@@ -66,9 +66,9 @@ final class SlashCommands extends Part {
 
     boolean localCommand(String text) {
         String t = text.trim().substring(1);
-        String[] parts = t.split("\\s+", 2);
-        String name = parts[0];
-        String arg = parts.length > 1 ? parts[1].trim() : "";
+        String[] cmd = t.split("\\s+", 2);
+        String name = cmd[0];
+        String arg = cmd.length > 1 ? cmd[1].trim() : "";
         switch (name) {
             case "help": {
                 List<Object> parts = new ArrayList<>();
