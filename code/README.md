@@ -22,8 +22,11 @@ Protocol (`agy acp`).
   app's own files, mode 0600), not on a port: no other app can reach it, so requests carry no token.
   The app speaks HTTP to it over a `LocalSocket`, checks it, has the service start it when it is gone
   or of another version, and gives it 30 s to answer. The event stream resumes where it left off with
-  the same bridge (it keeps the last 4000 events). The bridge logs its starts, stops, requests and
-  agy's starts, exits and stderr to `~/.agyapp/bridge.log`; Settings → 关于 → 日志 shows it.
+  the same bridge (it keeps the last 4000 events). The bridge logs its starts, stops, requests,
+  agy's starts, exits and stderr, and outbound network timings (via a lightweight loopback HTTP
+  `CONNECT` observability proxy injected into `agy`'s `HTTPS_PROXY`/`HTTP_PROXY` that logs dial
+  latency, uplink send time, TTFB, live server-wait stalls, and connection errors without decrypting
+  HTTPS) to `~/.agyapp/bridge.log`; Settings → 关于 → 日志 shows it.
 - One `agy acp` process holds every conversation as one of its sessions (JSON-RPC over its stdin and
   stdout). It is started when the app opens a conversation (once signed in), and stopped after 3
   hours unused; when it ends, a session is loaded in the next one again. Reactive wakeups (timers,

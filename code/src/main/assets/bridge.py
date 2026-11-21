@@ -35,7 +35,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlparse
 
-VERSION = 11  # Bridge VERSION in the app: an app update replaces an older running bridge
+VERSION = 12  # Bridge VERSION in the app: an app update replaces an older running bridge
 HOME = os.path.expanduser('~')
 GEMINI_DIR = os.path.join(HOME, '.gemini')
 AGY_DIR = os.environ.get('AGY_DATA_DIR') or os.path.join(GEMINI_DIR, 'antigravity-cli')
@@ -241,10 +241,504 @@ def agy_path():
     return shutil.which('agy') or '/usr/local/bin/agy'
 
 
+# ---- Local HTTP CONNECT observability proxy for agy's outbound network requests ----
+
+NET_LOG_HOSTS = (
+    'cloudcode-pa.googleapis.com',
+    'generativelanguage.googleapis.com',
+    'aicode.googleapis.com',
+    'oauth2.googleapis.com',
+    'antigravity.google',
+)
+NET_DIAL_TIMEOUT = 30.0
+NET_IDLE_CLOSE = 600.0
+NET_EXCHANGE_QUIET = 2.0
+NET_WAIT_FIRST = 15.0
+NET_WAIT_STEP = 60.0
+
+
+def _fmt_bytes(n):
+    if n < 1024:
+        return '%dB' % n
+    if n < 1024 * 1024:
+        return '%.1fKB' % (n / 1024.0)
+    return '%.2fMB' % (n / (1024.0 * 1024.0))
+
+
+def _fmt_dur(sec):
+    if sec < 0:
+        sec = 0.0
+    if sec < 1.0:
+        return '%dms' % round(sec * 1000)
+    return '%.1fs' % sec
+
+
+def _is_watched_host(host):
+    h = (host or '').strip().lower().strip('[]')
+    for suffix in NET_LOG_HOSTS:
+        if h == suffix or h.endswith('.' + suffix) or h.endswith('-' + suffix):
+            return True
+    return False
+
+
+def _no_proxy_match(host, no_proxy):
+    if not no_proxy:
+        return False
+    h = (host or '').strip().lower().strip('[]')
+    for entry in no_proxy.split(','):
+        e = entry.strip().lower()
+        if not e:
+            continue
+        if e == '*':
+            return True
+        if ':' in e and not e.startswith('['):
+            e = e.rsplit(':', 1)[0]
+        e = e.strip('[]')
+        if e.startswith('.'):
+            if h == e[1:] or h.endswith(e):
+                return True
+        elif h == e or h.endswith('.' + e):
+            return True
+    return False
+
+
+def _parse_host_port(authority, default_port=443):
+    authority = (authority or '').strip()
+    if not authority:
+        raise ValueError('empty authority')
+    if authority.startswith('['):
+        end = authority.find(']')
+        if end < 0:
+            raise ValueError('bad ipv6 authority')
+        host = authority[1:end]
+        rest = authority[end + 1:]
+        if not rest:
+            port = default_port
+        elif rest.startswith(':'):
+            port = int(rest[1:])
+        else:
+            raise ValueError('bad ipv6 port')
+    elif ':' in authority:
+        host, p = authority.rsplit(':', 1)
+        port = int(p)
+    else:
+        host, port = authority, default_port
+    if not host or not (1 <= port <= 65535):
+        raise ValueError('bad host or port')
+    return host, port
+
+
+def _proxy_auth_header(parsed):
+    if not parsed.username and not parsed.password:
+        return b''
+    import base64
+    raw = ('%s:%s' % (unquote(parsed.username or ''), unquote(parsed.password or ''))).encode('utf-8')
+    return b'Proxy-Authorization: Basic ' + base64.b64encode(raw) + b'\r\n'
+
+
+class NetProxy:
+    """Lightweight loopback HTTP/CONNECT proxy that agy routes through so bridge.log records
+    dial latency, uplink send duration, TTFB, live server-wait stalls, and connection errors
+    without decrypting HTTPS traffic."""
+
+    def __init__(self, dial_timeout=NET_DIAL_TIMEOUT, idle_close=NET_IDLE_CLOSE,
+                 exchange_quiet=NET_EXCHANGE_QUIET, wait_first=NET_WAIT_FIRST, wait_step=NET_WAIT_STEP):
+        self.dial_timeout = dial_timeout
+        self.idle_close = idle_close
+        self.exchange_quiet = exchange_quiet
+        self.wait_first = wait_first
+        self.wait_step = wait_step
+        self.lock = threading.Lock()
+        self.sock = None
+        self.port = 0
+        self.running = False
+        self.seq = 0
+        self.upstream_https = ''
+        self.upstream_http = ''
+        self.upstream_no_proxy = ''
+
+    def url(self):
+        with self.lock:
+            return 'http://127.0.0.1:%d' % self.port if self.running and self.port else ''
+
+    def start(self):
+        with self.lock:
+            if self.running:
+                return self.url()
+            self.upstream_https = (os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy') or '').strip()
+            self.upstream_http = (os.environ.get('HTTP_PROXY') or os.environ.get('http_proxy') or '').strip()
+            self.upstream_no_proxy = (os.environ.get('NO_PROXY') or os.environ.get('no_proxy') or '').strip()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(('127.0.0.1', 0))
+            sock.listen(64)
+            self.sock = sock
+            self.port = sock.getsockname()[1]
+            self.running = True
+            # Never loop back into ourselves if an inherited env var pointed at this port.
+            self_url = 'http://127.0.0.1:%d' % self.port
+            if self.upstream_https.rstrip('/') == self_url:
+                self.upstream_https = ''
+            if self.upstream_http.rstrip('/') == self_url:
+                self.upstream_http = ''
+            threading.Thread(target=self._accept_loop, daemon=True).start()
+            extra = ''
+            if self.upstream_https or self.upstream_http:
+                extra = ' (upstream %s)' % (self.upstream_https or self.upstream_http)
+            log('net proxy listening on %s%s' % (self_url, extra))
+            return self_url
+
+    def stop(self):
+        with self.lock:
+            self.running = False
+            sock, self.sock, self.port = self.sock, None, 0
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _next_id(self):
+        with self.lock:
+            self.seq += 1
+            return self.seq
+
+    def _accept_loop(self):
+        while True:
+            sock = self.sock
+            if not self.running or sock is None:
+                break
+            try:
+                client, _ = sock.accept()
+            except OSError:
+                if not self.running:
+                    break
+                time.sleep(0.05)
+                continue
+            threading.Thread(target=self._handle_client, args=(client,), daemon=True).start()
+
+    def _upstream_for(self, scheme, host):
+        if _no_proxy_match(host, self.upstream_no_proxy):
+            return None
+        raw = self.upstream_https if scheme == 'https' else (self.upstream_http or self.upstream_https)
+        if not raw:
+            return None
+        if '://' not in raw:
+            raw = 'http://' + raw
+        parsed = urlparse(raw)
+        if parsed.scheme not in ('http',) or not parsed.hostname:
+            return None
+        return parsed
+
+    def _dial(self, host, port, scheme, tunnel=True):
+        """Connects to (host, port), directly or via an inherited upstream HTTP proxy.
+        Returns (upstream_sock, dial_seconds, extra_from_upstream, via_label)."""
+        upstream = self._upstream_for(scheme, host)
+        t0 = time.monotonic()
+        if upstream is None:
+            sock = socket.create_connection((host, port), timeout=self.dial_timeout)
+            return sock, time.monotonic() - t0, b'', ''
+        phost = upstream.hostname
+        pport = upstream.port or 8080
+        sock = socket.create_connection((phost, pport), timeout=self.dial_timeout)
+        via = ' via %s:%d' % (phost, pport)
+        if not tunnel:
+            return sock, time.monotonic() - t0, b'', via
+        authority = ('[%s]:%d' % (host, port)) if ':' in host else ('%s:%d' % (host, port))
+        req = (
+            ('CONNECT %s HTTP/1.1\r\nHost: %s\r\n' % (authority, authority)).encode('ascii')
+            + _proxy_auth_header(upstream)
+            + b'\r\n'
+        )
+        sock.sendall(req)
+        resp = b''
+        while b'\r\n\r\n' not in resp and len(resp) < 16384:
+            chunk = sock.recv(4096)
+            if not chunk:
+                sock.close()
+                raise OSError('upstream proxy closed before CONNECT reply')
+            resp += chunk
+        head, extra = resp.split(b'\r\n\r\n', 1) if b'\r\n\r\n' in resp else (resp, b'')
+        first = head.split(b'\r\n', 1)[0].decode('latin1', 'replace')
+        parts = first.split(' ', 2)
+        if len(parts) < 2 or parts[1] != '200':
+            sock.close()
+            raise OSError('upstream proxy rejected CONNECT: %s' % first[:120])
+        return sock, time.monotonic() - t0, extra, via
+
+    def _set_nodelay(self, sock):
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+
+    def _handle_client(self, client):
+        upstream = None
+        try:
+            client.settimeout(self.dial_timeout)
+            self._set_nodelay(client)
+            buf = b''
+            while b'\r\n\r\n' not in buf and len(buf) < 65536:
+                chunk = client.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+            if b'\r\n\r\n' not in buf:
+                client.sendall(b'HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n')
+                return
+            head, extra = buf.split(b'\r\n\r\n', 1)
+            lines = head.split(b'\r\n')
+            req_line = lines[0].decode('latin1', 'replace')
+            parts = req_line.split(' ')
+            if len(parts) < 3:
+                client.sendall(b'HTTP/1.1 400 Bad Request\r\n\r\n')
+                return
+            method, target, proto = parts[0].upper(), parts[1], parts[2]
+            cid = self._next_id()
+            if method == 'CONNECT':
+                try:
+                    host, port = _parse_host_port(target, 443)
+                except ValueError:
+                    client.sendall(b'HTTP/1.1 400 Bad Request\r\n\r\n')
+                    return
+                label = '%s:%d' % (host, port)
+                watched = _is_watched_host(host)
+                t0 = time.monotonic()
+                try:
+                    upstream, dial_s, up_extra, via = self._dial(host, port, 'https', tunnel=True)
+                except OSError as e:
+                    log('net #%d %s dial failed after %s: %s' % (cid, label, _fmt_dur(time.monotonic() - t0), e))
+                    try:
+                        client.sendall(b'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n')
+                    except OSError:
+                        pass
+                    return
+                self._set_nodelay(upstream)
+                if watched or dial_s >= 1.0:
+                    log('net #%d open %s dial=%s%s' % (cid, label, _fmt_dur(dial_s), via))
+                client.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
+                if up_extra:
+                    client.sendall(up_extra)
+                self._relay(cid, label, watched, client, upstream, initial_tx=extra)
+            else:
+                parsed = urlparse(target)
+                host = parsed.hostname or ''
+                port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+                if not host:
+                    for raw_hdr in lines[1:]:
+                        if raw_hdr.lower().startswith(b'host:'):
+                            try:
+                                host, port = _parse_host_port(raw_hdr.split(b':', 1)[1].decode('latin1').strip(), 80)
+                            except ValueError:
+                                pass
+                            break
+                if not host:
+                    client.sendall(b'HTTP/1.1 400 Bad Request\r\n\r\n')
+                    return
+                label = '%s:%d' % (host, port)
+                watched = _is_watched_host(host)
+                use_upstream = self._upstream_for('http', host)
+                t0 = time.monotonic()
+                try:
+                    upstream, dial_s, _, via = self._dial(host, port, 'http', tunnel=False)
+                except OSError as e:
+                    log('net #%d %s dial failed after %s: %s' % (cid, label, _fmt_dur(time.monotonic() - t0), e))
+                    try:
+                        client.sendall(b'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n')
+                    except OSError:
+                        pass
+                    return
+                self._set_nodelay(upstream)
+                if watched or dial_s >= 1.0:
+                    log('net #%d open %s %s dial=%s%s' % (cid, method, label, _fmt_dur(dial_s), via))
+                if use_upstream is not None:
+                    # Forward full absolute-form HTTP request to upstream HTTP proxy.
+                    hdr_lines = [lines[0]] + [h for h in lines[1:] if not h.lower().startswith(b'proxy-authorization:')]
+                    auth = _proxy_auth_header(use_upstream)
+                    if auth:
+                        hdr_lines.append(auth.rstrip(b'\r\n'))
+                    outbound = b'\r\n'.join(hdr_lines) + b'\r\n\r\n' + extra
+                else:
+                    origin_path = (parsed.path or '/') + (('?' + parsed.query) if parsed.query else '')
+                    hdr_lines = [('%s %s %s' % (method, origin_path, proto)).encode('latin1')]
+                    has_host = False
+                    for h in lines[1:]:
+                        low = h.lower()
+                        if low.startswith(b'proxy-connection:') or low.startswith(b'proxy-authorization:'):
+                            continue
+                        if low.startswith(b'host:'):
+                            has_host = True
+                        hdr_lines.append(h)
+                    if not has_host:
+                        host_hdr = host if port == 80 else ('%s:%d' % (host, port))
+                        hdr_lines.append(('Host: %s' % host_hdr).encode('latin1'))
+                    outbound = b'\r\n'.join(hdr_lines) + b'\r\n\r\n' + extra
+                self._relay(cid, label, watched, client, upstream, initial_tx=outbound)
+        except OSError:
+            pass
+        finally:
+            for s in (client, upstream):
+                if s is not None:
+                    try:
+                        s.close()
+                    except OSError:
+                        pass
+
+    def _relay(self, cid, label, watched, client, upstream, initial_tx=b''):
+        client.settimeout(None)
+        upstream.settimeout(None)
+        t_open = time.monotonic()
+        last_activity = t_open
+        total_tx = 0
+        total_rx = 0
+
+        tx_bytes = 0
+        tx_start = 0.0
+        tx_last = 0.0
+        tx_send_dur = 0.0
+        rx_bytes = 0
+        rx_first = 0.0
+        rx_last = 0.0
+        wait_warned = set()
+
+        def flush_exchange(now, close_reason=''):
+            nonlocal tx_bytes, tx_start, tx_last, tx_send_dur, rx_bytes, rx_first, rx_last, wait_warned
+            if tx_bytes == 0 and rx_bytes == 0:
+                return
+            if rx_first and tx_last and rx_first >= tx_last:
+                ttfb = rx_first - tx_last
+            elif rx_first and tx_start and rx_first >= tx_start:
+                ttfb = rx_first - tx_start
+            else:
+                ttfb = (now - tx_last) if tx_last else 0.0
+            rx_dur = (rx_last - rx_first) if (rx_first and rx_last and rx_last > rx_first) else 0.0
+            notable = (
+                tx_send_dur >= 1.0
+                or ttfb >= 2.0
+                or bool(wait_warned)
+                or (tx_bytes > 0 and rx_bytes == 0 and bool(close_reason))
+                or (watched and (tx_bytes >= 512 or rx_bytes >= 1024 or ttfb >= 1.0))
+            )
+            if notable:
+                if rx_bytes > 0:
+                    log('net #%d %s tx=%s(send %s) ttfb=%s rx=%s(dur %s)' % (
+                        cid, label, _fmt_bytes(tx_bytes), _fmt_dur(tx_send_dur),
+                        _fmt_dur(ttfb), _fmt_bytes(rx_bytes), _fmt_dur(rx_dur)))
+                else:
+                    suffix = (' (%s)' % close_reason) if close_reason else ''
+                    log('net #%d %s tx=%s(send %s) no-reply after %s%s' % (
+                        cid, label, _fmt_bytes(tx_bytes), _fmt_dur(tx_send_dur),
+                        _fmt_dur(max(0.0, now - tx_last) if tx_last else 0.0), suffix))
+            tx_bytes = 0
+            tx_start = 0.0
+            tx_last = 0.0
+            tx_send_dur = 0.0
+            rx_bytes = 0
+            rx_first = 0.0
+            rx_last = 0.0
+            wait_warned = set()
+
+        def send_to_upstream(data):
+            nonlocal total_tx, tx_bytes, tx_start, tx_last, tx_send_dur, last_activity
+            now = time.monotonic()
+            if rx_bytes > 0 and ((rx_last and now - rx_last >= 0.2) or (tx_last and now - tx_last >= 1.0)):
+                flush_exchange(now)
+            t_s = time.monotonic()
+            upstream.sendall(data)
+            dt = time.monotonic() - t_s
+            n = len(data)
+            total_tx += n
+            tx_bytes += n
+            tx_send_dur += dt
+            if not tx_start:
+                tx_start = now
+            tx_last = time.monotonic()
+            last_activity = tx_last
+            if dt >= 1.0:
+                log('net #%d %s slow tx write %s took %s' % (cid, label, _fmt_bytes(n), _fmt_dur(dt)))
+
+        tick = min(1.0, max(0.05, min(self.wait_first, self.exchange_quiet) / 2.0))
+        c_open = True
+        u_open = True
+        close_reason = 'eof'
+        close_err = False
+        try:
+            if initial_tx:
+                send_to_upstream(initial_tx)
+            while c_open or u_open:
+                readable = []
+                if c_open:
+                    readable.append(client)
+                if u_open:
+                    readable.append(upstream)
+                if not readable:
+                    break
+                r, _, _ = select.select(readable, [], [], tick)
+                if client in r:
+                    data = client.recv(65536)
+                    if not data:
+                        c_open = False
+                        try:
+                            upstream.shutdown(socket.SHUT_WR)
+                        except OSError:
+                            pass
+                    else:
+                        send_to_upstream(data)
+                if upstream in r:
+                    data = upstream.recv(65536)
+                    if not data:
+                        u_open = False
+                        try:
+                            client.shutdown(socket.SHUT_WR)
+                        except OSError:
+                            pass
+                    else:
+                        now = time.monotonic()
+                        if tx_bytes > 0 and rx_first == 0.0:
+                            rx_first = now
+                            if wait_warned:
+                                log('net #%d %s first reply after %s (tx=%s, send %s)' % (
+                                    cid, label, _fmt_dur(rx_first - tx_last),
+                                    _fmt_bytes(tx_bytes), _fmt_dur(tx_send_dur)))
+                        client.sendall(data)
+                        n = len(data)
+                        total_rx += n
+                        rx_bytes += n
+                        rx_last = time.monotonic()
+                        last_activity = rx_last
+                now = time.monotonic()
+                if tx_bytes > 0 and rx_bytes == 0 and tx_last > 0:
+                    waited = now - tx_last
+                    next_threshold = self.wait_first if not wait_warned else (
+                        self.wait_step if max(wait_warned) < self.wait_step else max(wait_warned) + self.wait_step
+                    )
+                    if waited >= next_threshold:
+                        wait_warned.add(next_threshold)
+                        log('net #%d %s waiting %s for server (tx=%s, send %s, no reply yet)' % (
+                            cid, label, _fmt_dur(waited), _fmt_bytes(tx_bytes), _fmt_dur(tx_send_dur)))
+                elif rx_bytes > 0 and rx_last > 0 and now - rx_last >= self.exchange_quiet:
+                    flush_exchange(now)
+                if now - last_activity > self.idle_close:
+                    close_reason = 'idle'
+                    break
+        except OSError as e:
+            close_err = True
+            close_reason = '%s: %s' % (type(e).__name__, e)
+        now = time.monotonic()
+        flush_exchange(now, close_reason=close_reason if close_err or (tx_bytes > 0 and rx_bytes == 0) else '')
+        dur = now - t_open
+        if watched or close_err or dur >= 15.0:
+            log('net #%d close %s dur=%s tx=%s rx=%s (%s)' % (
+                cid, label, _fmt_dur(dur), _fmt_bytes(total_tx), _fmt_bytes(total_rx), close_reason))
+
+
+net_proxy = NetProxy()
+
+
 def agy_env():
     """agy's environment: the bridge's, the phone's time zone in TZ (the userland has no
-    /etc/localtime; none when the app has told no zone the userland has) and a Gemini API key given
-    in the app."""
+    /etc/localtime; none when the app has told no zone the userland has), a Gemini API key given
+    in the app, and the bridge's local observability proxy when running."""
     env = dict(os.environ)
     try:
         with open(TZ_FILE, encoding='utf-8') as f:
@@ -256,6 +750,17 @@ def agy_env():
     key = gemini_key()
     if key:
         env['GEMINI_API_KEY'] = key
+    proxy_url = net_proxy.url()
+    if proxy_url:
+        for k in ('HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'):
+            env[k] = proxy_url
+        no_proxy = [x.strip() for x in (env.get('NO_PROXY') or env.get('no_proxy') or '').split(',') if x.strip()]
+        for local in ('127.0.0.1', 'localhost', '::1'):
+            if local not in no_proxy:
+                no_proxy.append(local)
+        joined = ','.join(no_proxy)
+        env['NO_PROXY'] = joined
+        env['no_proxy'] = joined
     return env
 
 
@@ -3953,6 +4458,7 @@ def main():
             log('stop pid %d: signal %d' % (os.getpid(), signum))
             login.cancel()
             voice_dictator.stop('bridge shutdown')
+            net_proxy.stop()
             proc = agy.proc
             if proc is not None:
                 try:
@@ -3974,6 +4480,11 @@ def main():
         log('crash pid %d:\n%s' % (os.getpid(), ''.join(traceback.format_exception(kind, value, tb))))
     sys.excepthook = crashed
     threading.excepthook = lambda a: crashed(a.exc_type, a.exc_value, a.exc_traceback)
+
+    try:
+        net_proxy.start()
+    except OSError as e:
+        log('net proxy disabled: %s' % e)
 
     try:
         server = Server(args.socket, Handler)

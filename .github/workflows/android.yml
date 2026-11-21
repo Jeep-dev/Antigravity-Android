@@ -10,7 +10,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Test the bridge (with a fake agy)
-        run: python3 -I code/src/test/python/test_bridge_http.py
+        run: |
+          python3 -I code/src/test/python/test_bridge_http.py
+          python3 -I code/src/test/python/test_bridge_accounts.py
+          python3 -I code/src/test/python/test_bridge_wakeup.py
+          python3 -I code/src/test/python/test_bridge_proxy.py
       - name: Userland id
         run: echo "RUNTIME_ID=$(cat code/runtime/*.sh | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: actions/cache@v4
