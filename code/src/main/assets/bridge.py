@@ -34,7 +34,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlparse
 
-VERSION = 7  # Bridge VERSION in the app: an app update replaces an older running bridge
+VERSION = 8  # Bridge VERSION in the app: an app update replaces an older running bridge
 HOME = os.path.expanduser('~')
 GEMINI_DIR = os.path.join(HOME, '.gemini')
 AGY_DIR = os.environ.get('AGY_DATA_DIR') or os.path.join(GEMINI_DIR, 'antigravity-cli')
@@ -65,6 +65,8 @@ BYPASS = 'bypassPermissions'
 APP_MODES = {'default': 'default', 'acceptEdits': 'accept-edits', 'auto': 'auto', 'plan': 'plan'}
 IDLE_STOP = 3 * 60 * 60  # agy (a few hundred MB) is stopped after this long unused; started again when needed
 VOICE_IDLE_STOP = 15 * 60  # dictation agy TUI is stopped after this long unused
+AUTO_SETTLE_TEXT = 3.0  # quiet seconds after reply text before a reactive wakeup turn ends
+AUTO_SETTLE_IDLE = 45.0  # fallback quiet seconds when a reactive wakeup has no reply text yet
 SHORT_TITLE = 60  # characters of a first message shown as its conversation's name
 ERROR_MARK = '\u26a0'  # agy says a failed request in the reply's text, after this sign
 
@@ -916,6 +918,10 @@ class Chat:
         self.last_error = ''
         self.replaying = False
         self.title = None
+        self.autonomous = False  # True during a reactive wakeup (background task, timer, subagent) with no session/prompt
+        self.auto_has_text = False
+        self.active_tools = set()
+        self.auto_timer = None
 
     # ---- what agy says ----
 
@@ -935,6 +941,8 @@ class Chat:
             kind = u.get('sessionUpdate')
             if kind == 'usage_update':
                 self.usage = {'used': u.get('used') or 0, 'size': u.get('size') or 0}
+                if self.autonomous:
+                    self.schedule_auto_finish()
                 return
             if kind == 'available_commands_update':
                 self.commands = [c.get('name') for c in u.get('availableCommands') or [] if isinstance(c, dict) and c.get('name')]
@@ -953,12 +961,84 @@ class Chat:
             if kind == 'agent_message_chunk' and is_error_text(text_of(u.get('content'))) and not self.replaying:
                 self.last_error = error_text(text_of(u.get('content')))
                 log('chat %s: agy says: %s' % ((self.key or '-')[:8], self.last_error[:300]))
+                if not self.running and not self.deleted and self.key:
+                    self.start_autonomous(kind)
+                if self.autonomous:
+                    self.auto_has_text = True
+                    self.schedule_auto_finish()
                 return  # told as the turn's error when it ends
+            live_update = (
+                (kind in ('agent_message_chunk', 'agent_thought_chunk') and bool(text_of(u.get('content'))))
+                or kind in ('tool_call', 'plan')
+                or (kind == 'tool_call_update' and bool(u.get('kind') or u.get('rawInput') or u.get('title') or u.get('status') in ('completed', 'failed')))
+            )
+            if not self.replaying and not self.running and not self.deleted and self.key and live_update:
+                self.start_autonomous(kind)
             self.first_output(kind)
             self.transcript.apply(u)
             if self.replaying or not self.running or not self.key:
                 return
             self.translate(u)
+            if self.autonomous:
+                if kind == 'agent_message_chunk' and text_of(u.get('content')):
+                    self.auto_has_text = True
+                elif kind in ('tool_call', 'tool_call_update'):
+                    tid = u.get('toolCallId')
+                    if tid:
+                        if u.get('status') in ('completed', 'failed'):
+                            self.active_tools.discard(tid)
+                        else:
+                            self.active_tools.add(tid)
+                            self.auto_has_text = False
+                self.schedule_auto_finish()
+
+    def start_autonomous(self, kind):
+        """Starts streaming a reactive wakeup (background task, schedule timer, subagent) when no
+        session/prompt is in flight (the caller holds self.lock)."""
+        self.turn += 1
+        self.running = True
+        self.autonomous = True
+        self.auto_has_text = False
+        self.active_tools.clear()
+        self.last_error = ''
+        self.used = time.time()
+        self.turn_start = len(self.transcript.messages) if self.transcript is not None else 0
+        hub.emit(self.key, 'state', {'running': True})
+        self.begin_turn()
+        log('chat %s: reactive wakeup started (%s)' % ((self.key or '-')[:8], kind))
+
+    def cancel_auto_timer(self):
+        t, self.auto_timer = self.auto_timer, None
+        if t is not None:
+            t.cancel()
+
+    def schedule_auto_finish(self):
+        """Ends a reactive wakeup turn once agy goes quiet with no running tools or pending permissions."""
+        self.cancel_auto_timer()
+        if not self.autonomous or not self.running or self.deleted or self.active_tools or self.perms:
+            return
+        delay = AUTO_SETTLE_TEXT if self.auto_has_text else AUTO_SETTLE_IDLE
+        turn = self.turn
+        t = threading.Timer(delay, self.finish_autonomous, args=(turn,))
+        t.daemon = True
+        self.auto_timer = t
+        t.start()
+
+    def finish_autonomous(self, turn):
+        with self.lock:
+            if not self.autonomous or not self.running or self.deleted or self.turn != turn:
+                return
+            if self.active_tools or self.perms:
+                return
+            self.auto_timer = None
+            if self.last_error:
+                outcome = {'type': 'result', 'subtype': 'error', 'is_error': True, 'result': friendly(self.last_error)}
+                if self.transcript is not None:
+                    self.transcript.reply()['blocks'].append({'type': 'text', 'text': '请求失败：' + self.last_error})
+            else:
+                outcome = {'type': 'result', 'subtype': 'success', 'is_error': False}
+        log('chat %s: reactive wakeup ended' % ((self.key or '-')[:8]))
+        self.finish(outcome)
 
     def mark(self, what):
         with self.lock:
@@ -1075,6 +1155,7 @@ class Chat:
             self.show_tool(tool)
             request_id = 'perm-%s' % uuid.uuid4().hex[:12]
             self.perms[request_id] = (rid, options, tid)
+            self.cancel_auto_timer()
             log('chat %s: agy asks to run %s' % (self.key[:8], tool.get('name')))
             self.cc({'type': 'control_request', 'request_id': request_id, 'request': {
                 'subtype': 'can_use_tool', 'tool_use_id': tid, 'tool_name': tool.get('name') or 'tool', 'input': tool.get('input') or {}}})
@@ -1083,6 +1164,8 @@ class Chat:
         """The user's answer to agy's question: False when it is not asked any more."""
         with self.lock:
             found = self.perms.pop(request_id, None)
+            if found is not None and self.autonomous:
+                self.schedule_auto_finish()
         if found is None:
             return False
         rid, options, tid = found
@@ -1111,7 +1194,11 @@ class Chat:
             self.loaded = None
             self.agy_model = self.agy_mode = None
             was_running = self.running
+            self.cancel_auto_timer()
             self.running = False
+            self.autonomous = False
+            self.auto_has_text = False
+            self.active_tools.clear()
             self.prompts = []
             self.inserted = {}
             self.abandoned.clear()
@@ -1125,6 +1212,10 @@ class Chat:
         """A message: the next turn, or (a reply running) one inserted into it: agy gives it to the
         model with what it does next. The work is done in a thread of its own: starting agy and
         loading the session may take longer than the app waits for an answer."""
+        with self.lock:
+            finish_auto = self.autonomous and self.running
+        if finish_auto:
+            self.finish({'type': 'result', 'subtype': 'success', 'is_error': False})
         with self.lock:
             inserting = self.running and bool(self.prompts) and self.loaded == agy.gen and agy.alive()
             if session_id and not self.session_id:
@@ -1388,12 +1479,16 @@ class Chat:
         self.drop_questions()
         snap = None
         with self.lock:
+            self.cancel_auto_timer()
             self.close_block()
             for rid, (message_uuid, text, imgs) in list(self.inserted.items()):
                 self.cc({'type': 'command_lifecycle', 'command_uuid': message_uuid, 'state': 'discarded'})
             self.inserted = {}
             self.prompts = []
             self.running = False
+            self.autonomous = False
+            self.auto_has_text = False
+            self.active_tools.clear()
             self.used = time.time()
             if not self.deleted:
                 self.cc(result)
@@ -1407,8 +1502,12 @@ class Chat:
     def abort(self):
         """Stops and marks this conversation deleted so late callbacks never recreate its history."""
         with self.lock:
+            self.cancel_auto_timer()
             self.deleted = True
             self.running = False
+            self.autonomous = False
+            self.auto_has_text = False
+            self.active_tools.clear()
             self.prompts = []
             self.inserted = {}
             self.abandoned.clear()
@@ -1428,7 +1527,8 @@ class Chat:
         with self.lock:
             if not self.running:
                 return False
-            turn, prompts = self.turn, list(self.prompts)
+            turn, prompts, auto = self.turn, list(self.prompts), self.autonomous
+            self.cancel_auto_timer()
             self.cancelled_turn = turn
             log('chat %s: stop requested' % (self.key or '-')[:8])
         self.drop_questions()
@@ -1436,13 +1536,14 @@ class Chat:
             agy.notify('session/cancel', {'sessionId': self.session_id})
 
         def force():
-            time.sleep(10)
+            time.sleep(1.0 if auto else 10)
             with self.lock:
                 if not self.running or self.deleted or self.turn != turn:
                     return
                 self.abandoned.update(prompts)
                 self.abandoned.update(self.prompts)
-                log('chat %s: not stopped 10 s after cancel: ended here' % (self.key or '-')[:8])
+                if not auto:
+                    log('chat %s: not stopped 10 s after cancel: ended here' % (self.key or '-')[:8])
             self.finish({'type': 'result', 'subtype': 'error_during_execution', 'is_error': False})
         threading.Thread(target=force, daemon=True).start()
         return True
