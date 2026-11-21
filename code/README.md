@@ -1,4 +1,4 @@
-# Antigravity for Android (v0.1.4)
+# Antigravity for Android (v0.1.5)
 
 Google's Antigravity CLI (`agy`) on the phone in one app, no Termux needed: its own application id
 (`com.jeep.antigravity`), name and icon. No WebView: the interface is plain Android views (Java), so
@@ -25,8 +25,10 @@ Protocol (`agy acp`).
   the same bridge (it keeps the last 4000 events). The bridge logs its starts, stops, requests and
   agy's starts, exits and stderr to `~/.agyapp/bridge.log`; Settings → 关于 → 日志 shows it.
 - One `agy acp` process holds every conversation as one of its sessions (JSON-RPC over its stdin and
-  stdout). It is started when the app opens a conversation (once signed in), and stopped after 30
-  minutes unused; when it ends, a session is loaded in the next one again. A new conversation is
+  stdout). It is started when the app opens a conversation (once signed in), and stopped after 3
+  hours unused; when it ends, a session is loaded in the next one again. Reactive wakeups (timers,
+  background tasks, subagents) stream and persist automatically even when no `session/prompt` is in
+  flight. A new conversation is
   `session/new` (with the system prompt set in the app in `_meta.antigravity.systemPrompt.append`);
   a saved one is `session/load`, whose replay of the conversation (users' messages, replies, thinking,
   tool calls with their results) is kept as its transcript. Model and mode are `session/set_model`
