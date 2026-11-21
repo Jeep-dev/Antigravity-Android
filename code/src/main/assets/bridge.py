@@ -35,7 +35,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlparse
 
-VERSION = 10  # Bridge VERSION in the app: an app update replaces an older running bridge
+VERSION = 11  # Bridge VERSION in the app: an app update replaces an older running bridge
 HOME = os.path.expanduser('~')
 GEMINI_DIR = os.path.join(HOME, '.gemini')
 AGY_DIR = os.environ.get('AGY_DATA_DIR') or os.path.join(GEMINI_DIR, 'antigravity-cli')
@@ -954,6 +954,8 @@ class Chat:
         self.shown_tools = {}  # tool id -> (name, input) last told
         self.last_error = ''
         self.replaying = False
+        self.last_replay = 0.0
+        self.replay_quiet_until = 0.0
         self.title = None
         self.autonomous = False  # True during a reactive wakeup (background task, timer, subagent) with no session/prompt
         self.auto_has_text = False
@@ -993,9 +995,13 @@ class Chat:
                 if self.session_id and self.session_id not in read_json_cached(TITLES_FILE, {}):
                     hub.emit(self.key or '', 'title', {'session_id': self.session_id, 'title': u['title']})
                 return
+            if self.replaying:
+                self.last_replay = time.time()
             if self.transcript is None:
                 self.transcript = Transcript()
-            if kind == 'agent_message_chunk' and is_error_text(text_of(u.get('content'))) and not self.replaying:
+            prompt_live = self.running and (self.autonomous or bool(self.prompts))
+            in_replay_tail = (self.running and not prompt_live) or (not self.running and time.time() < self.replay_quiet_until)
+            if kind == 'agent_message_chunk' and is_error_text(text_of(u.get('content'))) and not self.replaying and not in_replay_tail:
                 self.last_error = error_text(text_of(u.get('content')))
                 log('chat %s: agy says: %s' % ((self.key or '-')[:8], self.last_error[:300]))
                 if not self.running and not self.deleted and self.key:
@@ -1009,11 +1015,12 @@ class Chat:
                 or kind in ('tool_call', 'plan')
                 or (kind == 'tool_call_update' and bool(u.get('kind') or u.get('rawInput') or u.get('title')))
             )
-            if not self.replaying and not self.running and not self.deleted and self.key and live_update:
+            if not self.replaying and not in_replay_tail and not self.running and not self.deleted and self.key and live_update:
                 self.start_autonomous(kind)
+                prompt_live = True
             self.first_output(kind)
             self.transcript.apply(u)
-            if self.replaying or not self.running or not self.key:
+            if self.replaying or not prompt_live or not self.key:
                 return
             self.translate(u)
             if self.autonomous:
@@ -1086,7 +1093,8 @@ class Chat:
         """Logs how long the reply took to begin, in its parts: the message to a session made or loaded
         (agy's first one is slow), to the prompt sent, and the model's first output (thinking, text, a tool)."""
         t = self.timing
-        if t is None or self.replaying or not self.running or kind not in ('agent_message_chunk', 'agent_thought_chunk', 'tool_call'):
+        if t is None or self.replaying or not self.running or not (self.autonomous or self.prompts) \
+                or kind not in ('agent_message_chunk', 'agent_thought_chunk', 'tool_call'):
             return
         self.timing = None
         now = time.time()
@@ -1418,9 +1426,19 @@ class Chat:
         cwd = self.cwd if os.path.isdir(self.cwd) else DEFAULT_CWD
         with self.lock:
             self.replaying = True
+            self.last_replay = 0.0
             before, self.transcript = self.transcript, Transcript()
         try:
             result = agy.request('session/load', {'sessionId': self.session_id, 'cwd': cwd, 'mcpServers': []}, timeout=120) or {}
+            # agy may still be flushing the tail of session/load replay updates asynchronously;
+            # wait briefly for them to settle before turning off replaying or saving history.
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                with self.lock:
+                    last = self.last_replay
+                if last <= 0 or time.time() - last >= 0.25:
+                    break
+                time.sleep(0.02)
         except Exception:
             with self.lock:
                 self.transcript = before
@@ -1428,6 +1446,7 @@ class Chat:
         finally:
             with self.lock:
                 self.replaying = False
+                self.replay_quiet_until = time.time() + 1.0
         with self.lock:
             self.loaded = agy.gen
             self.took(result)

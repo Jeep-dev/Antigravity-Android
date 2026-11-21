@@ -121,6 +121,27 @@ class ReactiveWakeupTest(unittest.TestCase):
             time.sleep(0.05)
         self.assertFalse(c.running)
 
+    def test_trailing_replay_never_leaks_before_prompt_or_starts_wakeup(self):
+        c = self.make_idle_chat()
+        # Case 1: send() marked running=True while session/load is still finishing, before prompt() sends session/prompt.
+        c.running = True
+        c.autonomous = False
+        c.prompts = []
+        c.timing = {'sent': time.time()}
+        c.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'old replayed reply'}})
+        # Must update transcript, but must NOT emit live stream events or consume first_output timing.
+        self.assertEqual(self.events, [])
+        self.assertIsNotNone(c.timing)
+        self.assertIn('old replayed reply', c.transcript.messages[-1]['blocks'][-1]['text'])
+
+        # Case 2: right after session/load finishes on an idle chat, trailing replay must not start autonomous wakeup.
+        c.running = False
+        c.replay_quiet_until = time.time() + 1.0
+        c.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'trailing replay'}})
+        self.assertFalse(c.running)
+        self.assertFalse(c.autonomous)
+        self.assertEqual(self.events, [])
+
 
 if __name__ == '__main__':
     unittest.main()

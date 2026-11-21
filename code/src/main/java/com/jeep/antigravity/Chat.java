@@ -502,6 +502,12 @@ final class Chat {
     /** Messages from the bridge's /history (agy's transcript). */
     void load(JSONObject history) {
         Msg live = reply(false); // a reply under way is not in the transcript yet: it stays, after it
+        Msg pendingUser = null;
+        if (running) {
+            int idx = messages.size() - 1;
+            if (live != null && idx >= 0 && messages.get(idx) == live) idx--;
+            if (idx >= 0 && messages.get(idx).kind == Msg.USER) pendingUser = messages.get(idx);
+        }
         messages.clear();
         if (!history.optString("model").isEmpty() && model == null) model = history.optString("model");
         JSONArray list = history.optJSONArray("messages");
@@ -517,6 +523,12 @@ final class Chat {
                 messages.add(savedUser(h));
             } else if ("assistant".equals(role)) {
                 messages.add(savedReply(h));
+            }
+        }
+        if (pendingUser != null) {
+            Msg tail = messages.isEmpty() ? null : messages.get(messages.size() - 1);
+            if (tail == null || tail.kind != Msg.USER || !pendingUser.text.equals(tail.text)) {
+                messages.add(pendingUser);
             }
         }
         if (live != null) messages.add(live);

@@ -29,6 +29,7 @@ public class FindTest {
         "| name | what |\n|---|:--:|\n| python | **bold** |\n| [link](http://p.y/python) |\n\nafter",
         "![alt python](pic.png)\n\nplain python",
         "# Title\n\n- one\n- two python\n\n1. first\n2. second",
+        "你这哪是高中联赛一试，这是**《世界著名数学未解之谜（80分钟速通版）》**：用**`python`**吗",
     };
 
     private final Application app = RuntimeEnvironment.getApplication();
@@ -61,5 +62,13 @@ public class FindTest {
         assertEquals(2, count(md.findable(REPLIES[1]), "python")); // inside the code, and the bold one; not ```python
         assertEquals(1, count(md.findable(REPLIES[2]), "python")); // the cell, not the link's address
         assertEquals(1, count(md.findable(REPLIES[3]), "python")); // not the picture's alt text
+    }
+
+    @Test public void cjkBoldAroundPunctuationRendersWithoutAsterisks() {
+        assertEquals("你这哪是高中联赛一试，这是《世界著名数学未解之谜（80分钟速通版）》：",
+                md.plain("你这哪是高中联赛一试，这是**《世界著名数学未解之谜（80分钟速通版）》**："));
+        assertEquals("用code和“引号”和（括号）吗",
+                md.plain("用**`code`**和**“引号”**和**（括号）**吗"));
+        assertEquals("**不是粗体**", md.plain("`**不是粗体**`"));
     }
 }

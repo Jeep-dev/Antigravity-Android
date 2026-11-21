@@ -2,6 +2,7 @@ package com.jeep.antigravity;
 
 import android.content.Context;
 import android.text.Layout;
+import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.ClickableSpan;
 import android.util.TypedValue;
@@ -204,7 +205,132 @@ final class Md {
 
     /** Markdown as the text it shows, without its marks. */
     String plain(String markdown) {
-        return markwon.toMarkdown(markdown.trim()).toString();
+        return renderMarkdown(markdown.trim()).toString();
+    }
+
+    /**
+     * Private-use sentinel inserted inside emphasis delimiters when punctuation borders CJK/word
+     * text (e.g. 这是**《标题》**：), where CommonMark's flanking rules otherwise leave literal `**`.
+     * Stripped from the rendered Spanned right after parsing so text, selection and /find stay exact.
+     */
+    private static final char CJK_PAD = '\uE000';
+
+    private Spanned renderMarkdown(String md) {
+        String patched = fixCjkEmphasis(md);
+        Spanned parsed = markwon.toMarkdown(patched);
+        if (patched.equals(md)) return parsed;
+        SpannableStringBuilder sb = parsed instanceof SpannableStringBuilder
+                ? (SpannableStringBuilder) parsed : new SpannableStringBuilder(parsed);
+        for (int i = sb.length() - 1; i >= 0; i--) {
+            if (sb.charAt(i) == CJK_PAD) sb.delete(i, i + 1);
+        }
+        return sb;
+    }
+
+    static String fixCjkEmphasis(String md) {
+        if (md == null || md.length() < 4 || md.indexOf(CJK_PAD) >= 0
+                || (md.indexOf("**") < 0 && md.indexOf("~~") < 0)) return md;
+        int n = md.length();
+        StringBuilder out = null;
+        int copied = 0;
+        int i = 0;
+        while (i < n) {
+            char ch = md.charAt(i);
+            if (ch == '\\' && i + 1 < n) { i += 2; continue; }
+            if (ch == '`') {
+                int end = skipCodeSpan(md, i);
+                i = end > i ? end : i + 1;
+                continue;
+            }
+            if (ch == '*' || ch == '~') {
+                int run = i;
+                while (run < n && md.charAt(run) == ch) run++;
+                int len = run - i;
+                if ((ch == '*' && (len == 2 || len == 3)) || (ch == '~' && len == 2)) {
+                    int innerStart = run;
+                    if (innerStart < n && !Character.isWhitespace(md.charAt(innerStart))) {
+                        int close = findClosingDelim(md, innerStart, ch, len);
+                        if (close > innerStart) {
+                            char firstIn = md.charAt(innerStart);
+                            char lastIn = md.charAt(close - 1);
+                            boolean padLeft = isPunctOrSymbol(firstIn);
+                            boolean padRight = isPunctOrSymbol(lastIn);
+                            if (padLeft || padRight) {
+                                if (out == null) out = new StringBuilder(n + 16);
+                                out.append(md, copied, innerStart);
+                                if (padLeft) out.append(CJK_PAD);
+                                out.append(md, innerStart, close);
+                                if (padRight) out.append(CJK_PAD);
+                                out.append(md, close, close + len);
+                                copied = i = close + len;
+                                continue;
+                            }
+                            i = close + len;
+                            continue;
+                        }
+                    }
+                }
+                i = run;
+                continue;
+            }
+            i++;
+        }
+        if (out == null) return md;
+        out.append(md, copied, n);
+        return out.toString();
+    }
+
+    private static int skipCodeSpan(String s, int start) {
+        int n = s.length(), ticks = 0;
+        while (start + ticks < n && s.charAt(start + ticks) == '`') ticks++;
+        int i = start + ticks;
+        while (i < n) {
+            if (s.charAt(i) == '`') {
+                int j = i;
+                while (j < n && s.charAt(j) == '`') j++;
+                if (j - i == ticks) return j;
+                i = j;
+            } else i++;
+        }
+        return start;
+    }
+
+    private static int findClosingDelim(String s, int from, char ch, int len) {
+        int n = s.length(), i = from;
+        while (i < n) {
+            char c = s.charAt(i);
+            if (c == '\\' && i + 1 < n) { i += 2; continue; }
+            if (c == '`') {
+                int end = skipCodeSpan(s, i);
+                i = end > i ? end : i + 1;
+                continue;
+            }
+            if (c == '\n' && i + 1 < n && s.charAt(i + 1) == '\n') return -1;
+            if (c == ch) {
+                int run = i;
+                while (run < n && s.charAt(run) == ch) run++;
+                if (run - i == len && i > from && !Character.isWhitespace(s.charAt(i - 1))) return i;
+                i = run;
+                continue;
+            }
+            i++;
+        }
+        return -1;
+    }
+
+    private static boolean isPunctOrSymbol(char ch) {
+        int t = Character.getType(ch);
+        return t == Character.CONNECTOR_PUNCTUATION
+                || t == Character.DASH_PUNCTUATION
+                || t == Character.START_PUNCTUATION
+                || t == Character.END_PUNCTUATION
+                || t == Character.INITIAL_QUOTE_PUNCTUATION
+                || t == Character.FINAL_QUOTE_PUNCTUATION
+                || t == Character.OTHER_PUNCTUATION
+                || t == Character.MATH_SYMBOL
+                || t == Character.CURRENCY_SYMBOL
+                || t == Character.MODIFIER_SYMBOL
+                || t == Character.OTHER_SYMBOL;
     }
 
     TextView prose(String markdown) {
@@ -226,7 +352,7 @@ final class Md {
         t.setTag(R.id.markdown, md);
         t.setTag(R.id.font, fontGen);
         t.setTypeface(Fonts.body(c));
-        markwon.setMarkdown(t, md);
+        markwon.setParsedMarkdown(t, renderMarkdown(md));
         if (t.getWidth() == 0 && md.contains("|") && !pendingLayouts.containsKey(t)) {
             // Tables size their columns from the text's width: render again once that is known.
             View.OnLayoutChangeListener l = new View.OnLayoutChangeListener() {
@@ -236,7 +362,7 @@ final class Md {
                     pendingLayouts.remove(t);
                     t.post(() -> {
                         String cur = (String) t.getTag(R.id.markdown);
-                        if (cur != null) markwon.setMarkdown(t, cur);
+                        if (cur != null) markwon.setParsedMarkdown(t, renderMarkdown(cur));
                     });
                 }
             };
@@ -326,7 +452,7 @@ final class Md {
 
     /** What a table cell shows: its Markdown rendered, without the line ends after it. */
     private CharSequence cellText(String markdown) {
-        CharSequence styled = markwon.toMarkdown(markdown);
+        CharSequence styled = renderMarkdown(markdown);
         int end = styled.length();
         while (end > 0 && Character.isWhitespace(styled.charAt(end - 1))) end--;
         return styled.subSequence(0, end);
