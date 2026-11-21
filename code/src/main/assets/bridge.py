@@ -34,7 +34,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlparse
 
-VERSION = 6  # Bridge VERSION in the app: an app update replaces an older running bridge
+VERSION = 7  # Bridge VERSION in the app: an app update replaces an older running bridge
 HOME = os.path.expanduser('~')
 GEMINI_DIR = os.path.join(HOME, '.gemini')
 AGY_DIR = os.environ.get('AGY_DATA_DIR') or os.path.join(GEMINI_DIR, 'antigravity-cli')
@@ -63,7 +63,7 @@ EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 # The app's permission modes: agy's own (session/set_mode), and 全部允许, the bridge answering yes itself.
 BYPASS = 'bypassPermissions'
 APP_MODES = {'default': 'default', 'acceptEdits': 'accept-edits', 'auto': 'auto', 'plan': 'plan'}
-IDLE_STOP = 30 * 60  # agy (a few hundred MB) is stopped after this long unused; started again when needed
+IDLE_STOP = 3 * 60 * 60  # agy (a few hundred MB) is stopped after this long unused; started again when needed
 VOICE_IDLE_STOP = 15 * 60  # dictation agy TUI is stopped after this long unused
 SHORT_TITLE = 60  # characters of a first message shown as its conversation's name
 ERROR_MARK = '\u26a0'  # agy says a failed request in the reply's text, after this sign
@@ -1761,9 +1761,26 @@ def session_image(session_id, n, k):
     return None
 
 
-def load_history(session_id):
+refreshing_history = set()
+refreshing_lock = threading.Lock()
+
+
+def _refresh_history(session_id):
+    try:
+        data = load_history(session_id, fast=False)
+        if data is not None:
+            hub.emit('', 'history', {'id': session_id})
+    except (AgyError, RpcError, OSError) as e:
+        log('history %s background refresh failed: %s' % (session_id[:8], e))
+    finally:
+        with refreshing_lock:
+            refreshing_history.discard(session_id)
+
+
+def load_history(session_id, fast=False):
     """The conversation as the app shows it: the one running here (up to the reply under way), the
-    copy kept here when agy has not changed it since, else agy's replay of it (session/load)."""
+    copy kept here when agy has not changed it since, else agy's replay of it (session/load).
+    When fast=True and an older saved copy exists, returns it immediately and refreshes in the background."""
     if not safe_id(session_id):
         return None
     titles = read_json(TITLES_FILE, {})
@@ -1780,6 +1797,13 @@ def load_history(session_id):
                 'title': titles.get(session_id), 'model': None, 'context': 0}
     if row is None:
         return None
+    if fast and saved:
+        with refreshing_lock:
+            if session_id not in refreshing_history:
+                refreshing_history.add(session_id)
+                threading.Thread(target=_refresh_history, args=(session_id,), daemon=True).start()
+        return {'id': session_id, 'messages': saved.get('messages', []), 'cwd': saved.get('cwd') or row['cwd'],
+                'title': titles.get(session_id), 'model': None, 'context': 0, 'stale': True}
     if chat is None:
         with chats_lock:
             for c in chats.values():
@@ -2670,6 +2694,10 @@ class VoiceDictator:
     def warm(self):
         if not os.path.exists(agy_path()) or not os.path.exists(TOKEN_FILE):
             return
+        # Let agy acp finish its cold-start prime first so both agy processes don't fight for CPU/IO.
+        deadline = time.time() + 6.0
+        while time.time() < deadline and agy.primed_gen != agy.gen and signed_in():
+            time.sleep(0.2)
         try:
             self.ensure(timeout=20)
         except AgyError as e:
@@ -3036,7 +3064,7 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, {'results': search_sessions(q.get('q', ''))})
 
     def get_history(self, q):
-        data = load_history(q.get('id', ''))
+        data = load_history(q.get('id', ''), fast=q.get('fast') == '1')
         self.reply(200 if data else 404, data or {'error': 'not found'})
 
     def get_config(self, q):
@@ -3393,7 +3421,9 @@ def main():
         log('exit pid %d: cannot listen on %s: %s' % (os.getpid(), args.socket, e))
         sys.exit('cannot listen on %s: %s' % (args.socket, e))
     threading.Thread(target=reaper, daemon=True).start()
-    threading.Thread(target=lambda: (find_agy_info(), find_models(), warm()), daemon=True).start()
+    threading.Thread(target=warm, daemon=True).start()
+    threading.Thread(target=find_agy_info, daemon=True).start()
+    threading.Thread(target=find_models, daemon=True).start()
     server.serve_forever()
 
 

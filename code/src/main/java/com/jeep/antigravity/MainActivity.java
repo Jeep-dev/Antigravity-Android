@@ -222,7 +222,7 @@ public final class MainActivity extends Activity implements Bridge.Events {
     void loadHistory(Chat target) {
         if (target.loaded || target.sessionId == null || !link.linked) return;
         target.loaded = true;
-        bridge.get("/history?id=" + Uri.encode(target.sessionId), (status, data) -> {
+        bridge.get("/history?id=" + Uri.encode(target.sessionId) + "&fast=1", (status, data) -> {
             if (status != 200) {
                 target.loaded = false;
                 toast(status == -2 ? "读取对话失败：桥接 30 秒没有回应" : status == -1 || status == Bridge.REFUSED ? "读取对话失败：连不上桥接" : "读取对话失败：" + data.optString("error", "HTTP " + status));
@@ -231,6 +231,20 @@ public final class MainActivity extends Activity implements Bridge.Events {
             target.load(data);
             if (!data.optString("cwd").isEmpty()) target.cwd = data.optString("cwd");
             if (current == target) { screen.adapter.show(target, true); screen.stick = true; renderNow(); }
+        });
+    }
+
+    /** Applies a background-refreshed history when the bridge finishes replaying a stale saved session. */
+    private void refreshHistory(String sessionId) {
+        if (sessionId == null || sessionId.isEmpty() || !link.linked) return;
+        String key = bySession.get(sessionId);
+        Chat target = key != null ? chats.get(key) : chats.get(sessionId);
+        if (target == null || target.running) return;
+        bridge.get("/history?id=" + Uri.encode(sessionId), (status, data) -> {
+            if (status != 200 || target.running) return;
+            target.load(data);
+            if (!data.optString("cwd").isEmpty()) target.cwd = data.optString("cwd");
+            if (current == target) { screen.adapter.show(target, false); renderNow(); }
         });
     }
 
@@ -281,6 +295,11 @@ public final class MainActivity extends Activity implements Bridge.Events {
         if ("gap".equals(ev.optString("kind"))) { gap(); return; }
         if ("config".equals(ev.optString("kind"))) { readConfig(); return; }
         if ("voice".equals(ev.optString("kind"))) { voice.onBridgeEvent(ev.optJSONObject("data")); return; }
+        if ("history".equals(ev.optString("kind"))) {
+            JSONObject d = ev.optJSONObject("data");
+            if (d != null) refreshHistory(d.optString("id"));
+            return;
+        }
         Chat chat = chatFor(ev);
         if (chat == null) return;
         chat.lastEvent = System.currentTimeMillis();

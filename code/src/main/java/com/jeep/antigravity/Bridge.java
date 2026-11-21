@@ -55,6 +55,8 @@ final class Bridge {
     private volatile long startedAt;
     private volatile boolean closed;
     private volatile Answer activeEvent;
+    /** Elapsed time of the last SSE line (event, ping or hello): detects a half-open stream on resume. */
+    private volatile long lastEventAt;
 
     Bridge(Context context, Events listener) {
         this.context = context.getApplicationContext();
@@ -224,7 +226,7 @@ final class Bridge {
     private Object[] exchange(String method, String path, String type, long length, Body body) {
         // Plugins and MCP servers are set up by agy itself, and a file is written whole
         // before the answer: these may take minutes.
-        int timeout = path.startsWith("/health") ? 3000
+        int timeout = path.startsWith("/health") ? 1500
                 : path.startsWith("/upload") ? 310_000 : 30000;
         long start = android.os.SystemClock.elapsedRealtime();
         try (Answer a = send(method, path, type, length, body, timeout)) {
@@ -394,21 +396,35 @@ final class Bridge {
             if (status == REFUSED && !new java.io.File(socket).exists()) return "no bridge was running";
             if (status == REFUSED && userland.bridgePid() == 0) return "no bridge was running, its socket left";
             if (status == REFUSED) error = (String) health[1];
-            try { Thread.sleep(300); } catch (InterruptedException e) { return "interrupted"; }
+            try { Thread.sleep(150); } catch (InterruptedException e) { return "interrupted"; }
         }
         return status == REFUSED ? "nothing took the connection on the socket, three times (" + error + ")"
-                : status == -2 ? "the running bridge did not answer within 3 s, three times"
+                : status == -2 ? "the running bridge did not answer within 1.5 s, three times"
                 : status == -1 ? "the running bridge could not be reached, three times" : "the running bridge answered " + status;
     }
 
     /** Waits at most 30 s for the bridge just started (proot and Python take a while on a phone). */
     private String waitUntilUp(double notStarted) {
-        long end = android.os.SystemClock.elapsedRealtime() + 30_000;
+        long start = android.os.SystemClock.elapsedRealtime();
+        long end = start + 30_000;
         while (!closed && android.os.SystemClock.elapsedRealtime() < end) {
-            try { Thread.sleep(100); } catch (InterruptedException e) { return "timeout"; }
+            try { Thread.sleep(android.os.SystemClock.elapsedRealtime() - start < 2000 ? 50 : 100); } catch (InterruptedException e) { return "timeout"; }
             if (isCurrent(exchange("GET", "/health", null), notStarted)) return "ok";
         }
         return "timeout";
+    }
+
+    /** Called on app resume: if the event stream missed a 5 s ping while frozen, drop it to reconnect at once. */
+    void checkLink() {
+        if (closed || !reading.get()) return;
+        long last = lastEventAt;
+        if (last == 0 || android.os.SystemClock.elapsedRealtime() - last < 6500) return;
+        submit(() -> {
+            if (closed || !reading.get()) return;
+            if (android.os.SystemClock.elapsedRealtime() - lastEventAt < 6500) return;
+            Answer a = activeEvent;
+            if (a != null) a.close();
+        });
     }
 
     /** Has the service start the bridge; it replaces one already running. */
@@ -422,6 +438,7 @@ final class Bridge {
     /** Reads the event stream, reconnecting, and hands events over in batches. */
     private void readEvents() {
         boolean up = false;
+        int fails = 0;
         while (reading.get() && !closed) {
             Answer a = null;
             try {
@@ -430,6 +447,8 @@ final class Bridge {
                 a = send("GET", path, null, 0, null, 15000); // three missed pings: the bridge is gone or frozen
                 activeEvent = a;
                 if (a.status != 200) throw new IOException("status " + a.status);
+                fails = 0;
+                lastEventAt = android.os.SystemClock.elapsedRealtime();
                 if (!up) {
                     up = true;
                     postUi(() -> listener.link(true));
@@ -437,6 +456,7 @@ final class Bridge {
                 BufferedReader reader = new BufferedReader(
                         new InputStreamReader(a.in, StandardCharsets.UTF_8));
                 for (String line; reading.get() && !closed && (line = reader.readLine()) != null; ) {
+                    lastEventAt = android.os.SystemClock.elapsedRealtime();
                     if (line.startsWith(": hello ")) {
                         String id = line.substring(8).trim();
                         String prev = lastBridge;
@@ -461,7 +481,9 @@ final class Bridge {
                     postUi(() -> listener.link(false));
                 }
                 if (!reading.get() || closed) return;
-                try { Thread.sleep(1500); } catch (InterruptedException ignored) { return; }
+                long wait = fails == 0 ? 200 : fails == 1 ? 500 : 1500;
+                fails++;
+                try { Thread.sleep(wait); } catch (InterruptedException ignored) { return; }
             } finally {
                 if (activeEvent == a) activeEvent = null;
                 if (a != null) a.close();

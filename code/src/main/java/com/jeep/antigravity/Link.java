@@ -23,6 +23,7 @@ final class Link extends Part {
         resumed = true;
         if (!linked && !connecting && setup == null) connect(false);
         else if (linked) {
+            bridge.checkLink();
             app.sender.opened(app.current);
             app.readConfig(); // the bridge lists the models again when anything they come from changed, and says so
         }
@@ -44,7 +45,7 @@ final class Link extends Part {
             app.drawer.updateLink();
             app.render();
             ui.removeCallbacks(recover);
-            ui.postDelayed(recover, 2000);
+            ui.postDelayed(recover, 350);
         }
     }
 
