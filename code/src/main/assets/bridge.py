@@ -34,7 +34,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlparse
 
-VERSION = 8  # Bridge VERSION in the app: an app update replaces an older running bridge
+VERSION = 9  # Bridge VERSION in the app: an app update replaces an older running bridge
 HOME = os.path.expanduser('~')
 GEMINI_DIR = os.path.join(HOME, '.gemini')
 AGY_DIR = os.environ.get('AGY_DATA_DIR') or os.path.join(GEMINI_DIR, 'antigravity-cli')
