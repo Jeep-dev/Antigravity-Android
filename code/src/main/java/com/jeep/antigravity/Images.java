@@ -122,6 +122,7 @@ final class Images {
         into.setTag(R.id.image, key);
         Bitmap hit = cache.get(key);
         if (hit != null) { into.setImageBitmap(hit); return; }
+        into.setImageDrawable(null);
         pool.execute(() -> {
             Bitmap b = decode(bytes(src, file), maxPx);
             main.post(() -> {
@@ -167,15 +168,24 @@ final class Images {
                 w.setAttributes(a);
             }
         }
-        if (c instanceof android.app.Activity && (((android.app.Activity) c).isFinishing() || ((android.app.Activity) c).isDestroyed())) return;
+        android.app.Activity act = activityOf(c);
+        if (act != null && (act.isFinishing() || act.isDestroyed())) return;
         d.show();
         int px = Math.max(c.getResources().getDisplayMetrics().widthPixels, c.getResources().getDisplayMetrics().heightPixels);
         load(view, src, file, px * 2, () -> {
             if (!d.isShowing()) return; // closed before it was read
-            if (c instanceof android.app.Activity && (((android.app.Activity) c).isFinishing() || ((android.app.Activity) c).isDestroyed())) return;
+            if (act != null && (act.isFinishing() || act.isDestroyed())) return;
             android.widget.Toast.makeText(c, "打不开这张图片", android.widget.Toast.LENGTH_SHORT).show();
             try { d.dismiss(); } catch (IllegalArgumentException ignored) {}
         });
+    }
+
+    private static android.app.Activity activityOf(Context c) {
+        while (c instanceof android.content.ContextWrapper) {
+            if (c instanceof android.app.Activity) return (android.app.Activity) c;
+            c = ((android.content.ContextWrapper) c).getBaseContext();
+        }
+        return c instanceof android.app.Activity ? (android.app.Activity) c : null;
     }
 
     /** An image fitted to the screen, zoomed and moved by touch. */

@@ -67,37 +67,42 @@ final class Skills extends Part {
     }
 
     void skillsSheet() {
-        Dialog sheet = sheets.sheet("技能", null);
-        LinearLayout card = sheets.card(sheet);
-        List<Skill> skills = skillList();
-        for (Skill k : skills) {
-            sheets.option(card, R.drawable.ic_spark, k.name, k.from, false, k.dir == null ? null : () -> { sheet.dismiss(); skillActions(k.dir); });
-        }
-        if (skills.isEmpty()) {
-            sheets.empty(card, "还没有");
-        }
-        LinearLayout add = sheets.card(sheet);
-        Ui.margins(add, app, 0, 10, 0, 0);
-        sheets.option(add, R.drawable.ic_plus, "新建", null, false, () -> {
-            sheet.dismiss();
-            sheets.textSheet("新建技能", "", "名称：小写字母、数字和 -", false, (t, done) -> {
-                String n = t.trim();
-                if (!n.matches("[a-z0-9][a-z0-9-]*")) { toast("名称只能用小写字母、数字和 -"); return; }
-                java.io.File f = new java.io.File(skillsDir(), n + "/SKILL.md");
-                if (f.exists()) { toast("已经有这个技能了"); return; }
-                try {
-                    Userland.write(f, "---\nname: " + n + "\ndescription: 一句话写清楚什么时候该用这个技能\n---\n\n在这里写给模型的做法和步骤。\n");
-                } catch (java.io.IOException e) {
-                    toast("新建失败：" + e.getMessage());
-                    return;
+        work.execute(() -> {
+            List<Skill> skills = skillList();
+            ui.post(() -> {
+                if (app.isFinishing() || app.isDestroyed()) return;
+                Dialog sheet = sheets.sheet("技能", null);
+                LinearLayout card = sheets.card(sheet);
+                for (Skill k : skills) {
+                    sheets.option(card, R.drawable.ic_spark, k.name, k.from, false, k.dir == null ? null : () -> { sheet.dismiss(); skillActions(k.dir); });
                 }
-                agent.relaunch();
-                app.settings.refreshSettings();
-                done.run();
-                editSkill(f.getParentFile());
-            }, null);
+                if (skills.isEmpty()) {
+                    sheets.empty(card, "还没有");
+                }
+                LinearLayout add = sheets.card(sheet);
+                Ui.margins(add, app, 0, 10, 0, 0);
+                sheets.option(add, R.drawable.ic_plus, "新建", null, false, () -> {
+                    sheet.dismiss();
+                    sheets.textSheet("新建技能", "", "名称：小写字母、数字和 -", false, (t, done) -> {
+                        String n = t.trim();
+                        if (!n.matches("[a-z0-9][a-z0-9-]*")) { toast("名称只能用小写字母、数字和 -"); return; }
+                        java.io.File f = new java.io.File(skillsDir(), n + "/SKILL.md");
+                        if (f.exists()) { toast("已经有这个技能了"); return; }
+                        try {
+                            Userland.write(f, "---\nname: " + n + "\ndescription: 一句话写清楚什么时候该用这个技能\n---\n\n在这里写给模型的做法和步骤。\n");
+                        } catch (java.io.IOException e) {
+                            toast("新建失败：" + e.getMessage());
+                            return;
+                        }
+                        agent.relaunch();
+                        app.settings.refreshSettings();
+                        done.run();
+                        editSkill(f.getParentFile());
+                    }, null);
+                });
+                sheet.show();
+            });
         });
-        sheet.show();
     }
 
     private void skillActions(java.io.File dir) {

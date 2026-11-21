@@ -64,9 +64,11 @@ class ReactiveWakeupTest(unittest.TestCase):
         c.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'Done! Here is the result.'}})
         c.update({'sessionUpdate': 'usage_update', 'used': 2000, 'size': 1000000})
 
-        # Wait for AUTO_SETTLE_TEXT to finish the reactive wakeup
+        # Wait for AUTO_SETTLE_TEXT to finish the reactive wakeup (and emit result after saving history)
         deadline = time.time() + 1.0
-        while c.running and time.time() < deadline:
+        while time.time() < deadline:
+            if not c.running and any(k == 'cc' and isinstance(d, dict) and d.get('type') == 'result' for _, k, d in self.events):
+                break
             time.sleep(0.02)
 
         self.assertFalse(c.running)

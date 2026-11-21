@@ -71,6 +71,10 @@ SHORT_TITLE = 60  # characters of a first message shown as its conversation's na
 ERROR_MARK = '\u26a0'  # agy says a failed request in the reply's text, after this sign
 
 
+_json_cache = {}  # path -> (mtime_ns, size, data)
+_json_cache_lock = threading.Lock()
+
+
 def read_json(path, default):
     try:
         with open(path, encoding='utf-8') as f:
@@ -80,20 +84,45 @@ def read_json(path, default):
         return default
 
 
+def read_json_cached(path, default):
+    """Cached read_json for small read-only state files; keyed by (mtime_ns, size)."""
+    try:
+        st = os.stat(path)
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        with _json_cache_lock:
+            _json_cache.pop(path, None)
+        return default
+    with _json_cache_lock:
+        hit = _json_cache.get(path)
+        if hit is not None and hit[0] == key:
+            data = hit[1]
+            return data if isinstance(data, type(default)) else default
+    data = read_json(path, default)
+    with _json_cache_lock:
+        _json_cache[path] = (key, data)
+    return data
+
+
 state_lock = threading.Lock()
 log_lock = threading.Lock()
 
 
-def write_json(path, data, mode=None):
+def write_json(path, data, mode=None, indent=2):
     """Written aside, then moved in: a write cut short leaves the last one whole."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     part = '%s.%d.%s.tmp' % (path, os.getpid(), uuid.uuid4().hex[:8])
     try:
-        with open(part, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        with open(part, 'w', encoding='utf-8', errors='replace') as f:
+            if indent is None:
+                json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
+            else:
+                json.dump(data, f, ensure_ascii=False, indent=indent)
         if mode is not None:
             os.chmod(part, mode)
         os.replace(part, path)
+        with _json_cache_lock:
+            _json_cache.pop(path, None)
     except Exception:
         try:
             os.remove(part)
@@ -120,7 +149,7 @@ class Hub:
         with self.cond:
             self.seq += 1
             self.events.append({'seq': self.seq, 'chat': chat, 'kind': kind, 'data': data})
-            if len(self.events) > self.keep:
+            if len(self.events) > self.keep + 512:
                 del self.events[:len(self.events) - self.keep]
             self.cond.notify_all()
 
@@ -236,7 +265,7 @@ def gemini_key():
 
 
 def agy_settings():
-    return read_json(AGY_SETTINGS, {})
+    return read_json_cached(AGY_SETTINGS, {})
 
 
 # ---- agy's models: "gemini-4-argon-high" is Gemini 4 Argon thinking high ----
@@ -286,7 +315,7 @@ def model_id_for(base, effort):
     it, else the nearest it has (medium first); the base itself when it is not listed."""
     if not base:
         return None
-    entry = next((m for m in read_json(MODELS_FILE, {}).get('models', []) if m.get('value') == base), None)
+    entry = next((m for m in read_json_cached(MODELS_FILE, {}).get('models', []) if m.get('value') == base), None)
     if entry is None:
         return base if not effort or split_model(base)[1] else '%s-%s' % (base, effort)
     ids = entry.get('ids') or {}
@@ -595,7 +624,7 @@ class Agy:
         proc = self.proc if proc is None else proc
         if proc is None or proc.poll() is not None:
             raise AgyError('agy 没在运行')
-        data = json.dumps(message, ensure_ascii=False).encode('utf-8') + b'\n'
+        data = json.dumps(message, ensure_ascii=False).encode('utf-8', 'replace') + b'\n'
         with self.write_lock:
             try:
                 proc.stdin.write(data)
@@ -625,10 +654,10 @@ class Agy:
             self.pending[rid] = slot
         try:
             self.write({'jsonrpc': '2.0', 'id': rid, 'method': method, 'params': params}, proc=proc)
-        except AgyError as e:
+        except Exception as e:
             with self.lock:
                 self.pending.pop(rid, None)
-            slot['error'] = e
+            slot['error'] = e if isinstance(e, AgyError) else AgyError('发送请求失败：%s' % e)
             slot['event'].set()
             if then:
                 threading.Thread(target=then, args=(slot,), daemon=True).start()
@@ -851,8 +880,13 @@ class Transcript:
                 self.tools[tid] = tool
                 self.reply()['blocks'].append(tool)
             if u.get('kind') or u.get('rawInput') or u.get('title') or u.get('content'):
-                tool['name'], tool['input'] = tool_view(dict(tool.get('_raw') or {}, **u))
-                tool['_raw'] = dict(tool.get('_raw') or {}, **{k: v for k, v in u.items() if k != 'sessionUpdate'})
+                prev_raw = tool.get('_raw') or {}
+                clean = {k: v for k, v in u.items() if k != 'sessionUpdate' and v is not None}
+                if 'content' in clean and first_diff(prev_raw) is not None and first_diff(clean) is None:
+                    clean.pop('content', None)
+                merged = dict(prev_raw, **clean)
+                tool['name'], tool['input'] = tool_view(merged)
+                tool['_raw'] = merged
             if u.get('status') in ('completed', 'failed'):
                 tool['result'], _ = tool_result(u)
                 tool['isError'] = u.get('status') == 'failed'
@@ -953,7 +987,7 @@ class Chat:
                 return
             if kind == 'session_info_update' and u.get('title'):
                 self.title = u['title']
-                if self.session_id and self.session_id not in read_json(TITLES_FILE, {}):
+                if self.session_id and self.session_id not in read_json_cached(TITLES_FILE, {}):
                     hub.emit(self.key or '', 'title', {'session_id': self.session_id, 'title': u['title']})
                 return
             if self.transcript is None:
@@ -970,7 +1004,7 @@ class Chat:
             live_update = (
                 (kind in ('agent_message_chunk', 'agent_thought_chunk') and bool(text_of(u.get('content'))))
                 or kind in ('tool_call', 'plan')
-                or (kind == 'tool_call_update' and bool(u.get('kind') or u.get('rawInput') or u.get('title') or u.get('status') in ('completed', 'failed')))
+                or (kind == 'tool_call_update' and bool(u.get('kind') or u.get('rawInput') or u.get('title')))
             )
             if not self.replaying and not self.running and not self.deleted and self.key and live_update:
                 self.start_autonomous(kind)
@@ -1038,7 +1072,7 @@ class Chat:
             else:
                 outcome = {'type': 'result', 'subtype': 'success', 'is_error': False}
         log('chat %s: reactive wakeup ended' % ((self.key or '-')[:8]))
-        self.finish(outcome)
+        self.finish(outcome, turn=turn)
 
     def mark(self, what):
         with self.lock:
@@ -1214,12 +1248,17 @@ class Chat:
         loading the session may take longer than the app waits for an answer."""
         with self.lock:
             finish_auto = self.autonomous and self.running
+            auto_turn = self.turn
         if finish_auto:
-            self.finish({'type': 'result', 'subtype': 'success', 'is_error': False})
+            self.finish({'type': 'result', 'subtype': 'success', 'is_error': False}, turn=auto_turn)
         with self.lock:
             inserting = self.running and bool(self.prompts) and self.loaded == agy.gen and agy.alive()
+            if self.running and not self.prompts and message_uuid is not None:
+                self.cc({'type': 'command_lifecycle', 'command_uuid': message_uuid, 'state': 'failed'})
+                return
             if session_id and not self.session_id:
                 self.session_id = session_id
+                index_chat_session(self, session_id)
             if cwd and self.loaded is None:
                 self.cwd = cwd
             self.model, self.effort, self.mode = model, effort, mode
@@ -1234,6 +1273,10 @@ class Chat:
                     images.append((src.get('media_type') or 'image/png', src.get('data', '')))
             self.used = self.last_out = time.time()
             if not inserting:
+                self.cancel_auto_timer()
+                self.autonomous = False
+                self.auto_has_text = False
+                self.active_tools.clear()
                 self.turn += 1
                 self.running = True
                 self.last_error = ''
@@ -1246,21 +1289,26 @@ class Chat:
     def deliver(self, text, images, inserting, message_uuid, turn):
         try:
             if inserting:
-                self.prompt(text, images, message_uuid)
+                self.prompt(text, images, message_uuid, turn)
                 return
             self.ready_session()
             self.mark('session')
             name = re.match(r'^/(?:name|rename)\s+(\S[\s\S]*)$', text.strip()) if not images else None
             if name:  # /name: the app's own name for it, not a message to the model
+                cancelled = False
                 with self.lock:
-                    if self.turn != turn or self.deleted or self.cancelled_turn == turn:
-                        if self.cancelled_turn == turn and self.running:
-                            self.finish({'type': 'result', 'subtype': 'error_during_execution', 'is_error': False})
+                    if self.turn != turn or self.deleted:
                         return
-                    self.begin_turn()
+                    if self.cancelled_turn == turn:
+                        cancelled = True
+                    else:
+                        self.begin_turn()
+                if cancelled:
+                    self.finish({'type': 'result', 'subtype': 'error_during_execution', 'is_error': False}, turn=turn)
+                    return
                 set_title(self.session_id, name.group(1))
                 keep_title(self.key, self.session_id, ' '.join(name.group(1).split())[:200])
-                self.finish({'type': 'result', 'subtype': 'success', 'is_error': False})
+                self.finish({'type': 'result', 'subtype': 'success', 'is_error': False}, turn=turn)
                 return
             with self.lock:
                 if self.turn != turn or self.deleted:
@@ -1271,9 +1319,9 @@ class Chat:
                     cancelled = False
                     self.begin_turn()
             if cancelled:
-                self.finish({'type': 'result', 'subtype': 'error_during_execution', 'is_error': False})
+                self.finish({'type': 'result', 'subtype': 'error_during_execution', 'is_error': False}, turn=turn)
                 return
-            self.prompt(text, images, None)
+            self.prompt(text, images, None, turn)
         except Exception as e:
             if not isinstance(e, (AgyError, RpcError)):
                 import traceback
@@ -1283,7 +1331,7 @@ class Chat:
             if inserting:
                 self.cc({'type': 'command_lifecycle', 'command_uuid': message_uuid, 'state': 'failed'})
                 return
-            self.finish({'type': 'result', 'subtype': 'error', 'is_error': True, 'result': friendly(str(e))})
+            self.finish({'type': 'result', 'subtype': 'error', 'is_error': True, 'result': friendly(str(e))}, turn=turn)
 
     def begin_turn(self):
         """The turn's start as the app knows it (the caller holds the lock)."""
@@ -1320,6 +1368,7 @@ class Chat:
                     self.loaded = gen
                     self.transcript = Transcript()
                     self.took(result)
+                index_chat_session(self, self.session_id)
                 with agy.lock:
                     early = agy.early.pop(self.session_id, [])
                 for u in early:
@@ -1385,11 +1434,13 @@ class Chat:
                 1 for m in self.transcript.messages if m.get('role') == 'assistant'
                 for b in m.get('blocks') or [] if b.get('type') == 'tool'
             )
+            deleted = self.deleted
             view = self.transcript.view()
-        save_history(self.session_id, view, self.cwd)
+        if not deleted:
+            save_history(self.session_id, view, self.cwd)
         log('chat %s: session %s loaded (%d messages)' % ((self.key or '-')[:8], self.session_id, len(view)))
 
-    def prompt(self, text, images, message_uuid):
+    def prompt(self, text, images, message_uuid, turn=None):
         """Sends the message to agy; the turn ends (or, inserted, the message is the model's) when
         agy answers it."""
         blocks = [{'type': 'image', 'mimeType': mime, 'data': data} for mime, data in images if data]
@@ -1398,6 +1449,8 @@ class Chat:
         with self.lock:
             if message_uuid is not None and not self.running:
                 self.cc({'type': 'command_lifecycle', 'command_uuid': message_uuid, 'state': 'failed'})
+                return
+            if message_uuid is None and (self.deleted or (turn is not None and self.turn != turn)):
                 return
             if self.transcript is None:
                 self.transcript = Transcript()
@@ -1426,10 +1479,15 @@ class Chat:
                 return
             if rid not in self.prompts:
                 return
-            later = self.prompts[self.prompts.index(rid) + 1:]
+            idx = self.prompts.index(rid)
+            later = self.prompts[idx + 1:]
             self.prompts.remove(rid)
             error, result = slot.get('error'), slot.get('result') or {}
             self.count_locked(result.get('usage'))
+            if idx > 0 and rid in self.inserted:
+                ins = self.inserted.pop(rid)
+                self.cc({'type': 'command_lifecycle', 'command_uuid': ins[0], 'state': 'failed'})
+                return
             if later:
                 # The message after it is the model's now: shown as one of the conversation's.
                 nxt = self.inserted.pop(later[0], None)
@@ -1446,6 +1504,7 @@ class Chat:
             if ins is not None and (self.prompts or not self.running):
                 self.cc({'type': 'command_lifecycle', 'command_uuid': ins[0], 'state': 'failed'})
                 return
+            turn = self.turn
         if error is not None:
             outcome = {'type': 'result', 'subtype': 'error', 'is_error': True, 'result': friendly(str(error))}
         elif result.get('stopReason') == 'cancelled':
@@ -1461,7 +1520,7 @@ class Chat:
             outcome = {'type': 'result', 'subtype': 'success', 'is_error': False}
         log('chat %s: turn ended (%s%s)' % ((self.key or '-')[:8], result.get('stopReason') or outcome['subtype'],
                                             ': %s' % error if error else ''))
-        self.finish(outcome)
+        self.finish(outcome, turn=turn)
 
     def count(self, usage):
         with self.lock:
@@ -1474,11 +1533,14 @@ class Chat:
                             ('cacheWrite', 'cachedWriteTokens'), ('thinking', 'thoughtTokens')):
             self.totals[key] += usage.get(theirs) or 0
 
-    def finish(self, result):
+    def finish(self, result, turn=None):
         """The turn is over: the app is told, what is still asked is dropped, the transcript kept."""
-        self.drop_questions()
         snap = None
+        deleted = False
         with self.lock:
+            if not self.running or (turn is not None and self.turn != turn):
+                return
+            left, self.perms = self.perms, {}
             self.cancel_auto_timer()
             self.close_block()
             for rid, (message_uuid, text, imgs) in list(self.inserted.items()):
@@ -1490,12 +1552,16 @@ class Chat:
             self.auto_has_text = False
             self.active_tools.clear()
             self.used = time.time()
-            if not self.deleted:
-                self.cc(result)
-                if self.session_id and self.transcript is not None:
-                    snap = (self.session_id, self.transcript.view(), self.cwd)
+            deleted = self.deleted
+            if not deleted and self.session_id and self.transcript is not None:
+                snap = (self.session_id, self.transcript.view(), self.cwd)
+        for request_id, (rid, options, tid) in left.items():
+            agy.respond(rid, {'outcome': {'outcome': 'cancelled'}})
+            self.cc({'type': 'control_cancel_request', 'request_id': request_id})
         if snap is not None:
             save_history(*snap)
+        if not deleted:
+            self.cc(result)
         if agy.restart_reason and not any(c.running for c in all_chats()) and not agy.busy():
             agy.stop(agy.restart_reason)
 
@@ -1544,7 +1610,7 @@ class Chat:
                 self.abandoned.update(self.prompts)
                 if not auto:
                     log('chat %s: not stopped 10 s after cancel: ended here' % (self.key or '-')[:8])
-            self.finish({'type': 'result', 'subtype': 'error_during_execution', 'is_error': False})
+            self.finish({'type': 'result', 'subtype': 'error_during_execution', 'is_error': False}, turn=turn)
         threading.Thread(target=force, daemon=True).start()
         return True
 
@@ -1563,8 +1629,17 @@ class Chat:
 
 
 chats = {}  # the app's key -> Chat
+chats_by_session = {}  # session id -> Chat (index into chats for O(1) lookup)
 loose = {}  # session id -> Chat of a session read (/history) that no conversation of the app has taken yet
 chats_lock = threading.Lock()
+
+
+def index_chat_session(chat, session_id):
+    if not session_id:
+        return
+    with chats_lock:
+        if chat.key and chats.get(chat.key) is chat:
+            chats_by_session[session_id] = chat
 seen_messages = []  # ids of messages already sent: the app may repeat a request whose answer it lost
 known_commands = []
 known_modes = []
@@ -1608,29 +1683,48 @@ def chat_for(key, session_id=None, create=True):
         if key in chats:
             return chats[key]
         if session_id:
+            existing = chats_by_session.get(session_id)
+            if existing is not None and existing.key in chats and chats[existing.key] is existing:
+                del chats[existing.key]
+                existing.key = key
+                chats[key] = existing
+                return existing
             for old_key, chat in list(chats.items()):
                 if chat.session_id == session_id:
                     del chats[old_key]
                     chat.key = key
                     chats[key] = chat
+                    chats_by_session[session_id] = chat
                     return chat
             if session_id in loose:
                 chat = loose.pop(session_id)
                 chat.key = key
                 chats[key] = chat
+                chats_by_session[session_id] = chat
                 return chat
         if not create:
             return None
-        chats[key] = Chat(key, session_id)
-        return chats[key]
+        chat = Chat(key, session_id)
+        chats[key] = chat
+        if session_id:
+            chats_by_session[session_id] = chat
+        return chat
 
 
 def chat_of_session(session_id):
     if not session_id:
         return None
     with chats_lock:
+        found = chats_by_session.get(session_id)
+        if found is not None:
+            if found.key in chats and chats[found.key] is found and found.session_id == session_id:
+                return found
+            chats_by_session.pop(session_id, None)
         found = next((c for c in chats.values() if c.session_id == session_id), None)
-        return found or loose.get(session_id)
+        if found is not None:
+            chats_by_session[session_id] = found
+            return found
+        return loose.get(session_id)
 
 
 def reaper():
@@ -1734,6 +1828,18 @@ def one_line(text, limit=SHORT_TITLE):
     return t if len(t) <= limit else t[:limit - 1] + '…'
 
 
+def _format_session_row(row):
+    sid, title, preview, steps, modified, uris, parent, depth = row
+    if parent or (depth or 0) > 0 or not steps:
+        return None
+    try:
+        folders = [uri_path(u) for u in json.loads(uris or '[]')]
+    except ValueError:
+        folders = []
+    return {'id': sid, 'title': title or '', 'preview': preview or '', 'cwd': folders[0] if folders else '',
+            'mtime': parse_time(modified), 'stamp': modified or '', 'steps': steps}
+
+
 def db_sessions():
     """agy's conversations (not a sub-agent's, not one where nothing was said), newest first, from its
     own list: id, title, preview, folder, when it last changed. [] when there is none yet."""
@@ -1746,28 +1852,32 @@ def db_sessions():
     finally:
         db.close()
     out = []
-    for sid, title, preview, steps, modified, uris, parent, depth in rows:
-        if parent or (depth or 0) > 0 or not steps:
-            continue
-        try:
-            folders = [uri_path(u) for u in json.loads(uris or '[]')]
-        except ValueError:
-            folders = []
-        out.append({'id': sid, 'title': title or '', 'preview': preview or '', 'cwd': folders[0] if folders else '',
-                    'mtime': parse_time(modified), 'stamp': modified or '', 'steps': steps})
+    for row in rows:
+        item = _format_session_row(row)
+        if item is not None:
+            out.append(item)
     out.sort(key=lambda s: (-s['mtime'], s['id']))
     return out
 
 
 def session_row(session_id):
+    if not session_id or not os.path.exists(SUMMARIES_DB):
+        return None
     try:
-        return next((s for s in db_sessions() if s['id'] == session_id), None)
+        db = sqlite3.connect('file:%s?mode=ro' % SUMMARIES_DB, uri=True, timeout=3)
+        try:
+            row = db.execute('SELECT conversation_id, title, preview, step_count, last_modified_time, workspace_uris, '
+                             'parent_conversation_id, nesting_depth FROM conversation_summaries '
+                             'WHERE conversation_id = ? LIMIT 1', (session_id,)).fetchone()
+        finally:
+            db.close()
+        return _format_session_row(row) if row is not None else None
     except sqlite3.Error:
         return None
 
 
 def list_sessions():
-    titles, hidden = read_json(TITLES_FILE, {}), set(read_json(HIDDEN_FILE, []))
+    titles, hidden = read_json_cached(TITLES_FILE, {}), set(read_json_cached(HIDDEN_FILE, []))
     try:
         rows = db_sessions()
     except sqlite3.Error as e:
@@ -1796,7 +1906,11 @@ def save_history(session_id, messages, cwd):
     row = session_row(session_id)
     try:
         with history_lock:
-            write_json(history_path(session_id), {'stamp': row['stamp'] if row else '', 'cwd': cwd, 'messages': messages})
+            if session_id in read_json_cached(HIDDEN_FILE, []):
+                return
+            write_json(history_path(session_id), {'stamp': row['stamp'] if row else '', 'cwd': cwd, 'messages': messages}, indent=None)
+        with _search_lock:
+            _search_cache.pop(session_id, None)
     except OSError as e:
         log('history %s not kept: %s' % (session_id, e))
 
@@ -1884,7 +1998,7 @@ def load_history(session_id, fast=False):
     When fast=True and an older saved copy exists, returns it immediately and refreshes in the background."""
     if not safe_id(session_id):
         return None
-    titles = read_json(TITLES_FILE, {})
+    titles = read_json_cached(TITLES_FILE, {})
     chat = chat_of_session(session_id)
     if chat is not None and chat.transcript is not None and chat.loaded == agy.gen and agy.alive():
         with chat.lock:
@@ -1929,22 +2043,53 @@ def load_history(session_id, fast=False):
                 'cwd': chat.cwd, 'title': titles.get(session_id), 'model': chat.agy_model, 'context': chat.usage.get('used', 0)}
 
 
+_search_cache = {}  # session_id -> (mtime_ns, size, body_text, body_lower)
+_search_lock = threading.Lock()
+
+
+def _session_body_text(session_id):
+    path = history_path(session_id)
+    try:
+        st = os.stat(path)
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        with _search_lock:
+            _search_cache.pop(session_id, None)
+        return '', ''
+    with _search_lock:
+        hit = _search_cache.get(session_id)
+        if hit is not None and hit[0] == sig:
+            return hit[1], hit[2]
+    texts = []
+    for m in read_json(path, {}).get('messages', []):
+        if m.get('role') == 'user':
+            texts.append(m.get('text') or '')
+        for b in m.get('blocks') or []:
+            if b.get('type') == 'text':
+                texts.append(b.get('text') or '')
+    body = '\n'.join(texts)
+    body_lower = body.lower()
+    with _search_lock:
+        _search_cache[session_id] = (sig, body, body_lower)
+    return body, body_lower
+
+
 def search_sessions(query):
     """Conversations whose kept transcript (or name) has the words: those read here once."""
     q = query.strip().lower()
     if not q:
         return []
-    out, titles = [], read_json(TITLES_FILE, {})
+    out = []
     for s in list_sessions():
-        texts = [s['title']]
-        for m in read_json(history_path(s['id']), {}).get('messages', []):
-            if m.get('role') == 'user':
-                texts.append(m.get('text') or '')
-            for b in m.get('blocks') or []:
-                if b.get('type') == 'text':
-                    texts.append(b.get('text') or '')
-        text = '\n'.join(texts)
-        at = text.lower().find(q)
+        title = s['title']
+        body, body_lower = _session_body_text(s['id'])
+        if body:
+            text = title + '\n' + body
+            lower = title.lower() + '\n' + body_lower
+        else:
+            text = title
+            lower = title.lower()
+        at = lower.find(q)
         if at >= 0:
             out.append({'id': s['id'], 'snippet': ' '.join(text[max(0, at - 30):at + len(q) + 60].split())})
     return out
@@ -1968,6 +2113,7 @@ def delete_session(session_id):
         return False
     with chats_lock:
         gone = [chats.pop(k) for k in [k for k, c in chats.items() if c.session_id == session_id]]
+        chats_by_session.pop(session_id, None)
         if session_id in loose:
             gone.append(loose.pop(session_id))
     for chat in gone:
@@ -2007,10 +2153,13 @@ def remove_session_files(session_id, remember=True):
             pass
     for folder in (os.path.join(AGY_DIR, 'brain', session_id), os.path.join(IMAGES_DIR, session_id)):
         shutil.rmtree(folder, ignore_errors=True)
-    try:
-        os.remove(history_path(session_id))
-    except OSError:
-        pass
+    with history_lock:
+        try:
+            os.remove(history_path(session_id))
+        except OSError:
+            pass
+    with _search_lock:
+        _search_cache.pop(session_id, None)
 
 
 def delete_all():
@@ -2019,6 +2168,7 @@ def delete_all():
     with chats_lock:
         gone = list(chats.values()) + list(loose.values())
         chats.clear()
+        chats_by_session.clear()
         loose.clear()
     for chat in gone:
         chat.abort()
@@ -2039,13 +2189,18 @@ def delete_all():
             os.remove(SUMMARIES_DB + suffix)
         except OSError:
             pass
-    for folder in (HISTORY_DIR, IMAGES_DIR):
-        shutil.rmtree(folder, ignore_errors=True)
+    with history_lock:
+        for folder in (HISTORY_DIR, IMAGES_DIR):
+            shutil.rmtree(folder, ignore_errors=True)
+    with _search_lock:
+        _search_cache.clear()
     for path in (TITLES_FILE, HIDDEN_FILE):
         try:
             os.remove(path)
         except OSError:
             pass
+        with _json_cache_lock:
+            _json_cache.pop(path, None)
     log('every conversation deleted')
 
 
@@ -2102,7 +2257,7 @@ def account():
     if api_key_mode():
         return {'signedIn': True, 'method': 'apiKey', 'email': ''}
     if os.path.exists(TOKEN_FILE):
-        return {'signedIn': True, 'method': 'google', 'email': read_json(ACCOUNT_FILE, {}).get('email', '')}
+        return {'signedIn': True, 'method': 'google', 'email': read_json_cached(ACCOUNT_FILE, {}).get('email', '')}
     return {'signedIn': False, 'method': '', 'email': ''}
 
 
@@ -2169,7 +2324,7 @@ def plan_usage():
 
 def read_config():
     threading.Thread(target=find_models, daemon=True).start()  # a no-op unless something changed
-    saved = read_json(MODELS_FILE, {})
+    saved = read_json_cached(MODELS_FILE, {})
     models = [{k: v for k, v in m.items() if k != 'ids'} for m in saved.get('models', [])]
     base, effort = split_model(saved.get('current', ''))
     efforts = [e for e in EFFORTS if any(e in (m.get('efforts') or []) for m in models)]
@@ -2396,6 +2551,8 @@ class VtScreen:
         self.dim.pop()
         self.dim.insert(0, [False] * self.cols)
 
+    CSI_RE = re.compile(r'\x1b\[([0-9;?<>!=]*?)([A-Za-z@`~])')
+
     def feed(self, text):
         self.buf += text
         i, n = 0, len(self.buf)
@@ -2406,15 +2563,15 @@ class VtScreen:
                     break
                 nxt = self.buf[i + 1]
                 if nxt == '[':
-                    m = re.match(r'\x1b\[([0-9;?<>!=]*?)([A-Za-z@`~])', self.buf[i:])
+                    m = self.CSI_RE.match(self.buf, i)
                     if not m:
                         if n - i < 48:
                             break
                         i += 1
                         continue
                     params, cmd = m.group(1), m.group(2)
-                    i += m.end()
-                    if not params or params[0] not in '?><=!':
+                    i = m.end()
+                    if all(c in '0123456789;' for c in params):
                         ps = [int(x) if x else 0 for x in params.split(';')] if params else [0]
                         p1 = ps[0]
                         p2 = ps[1] if len(ps) > 1 else 0
@@ -2465,8 +2622,9 @@ class VtScreen:
                                 self.grid[self.r][self.c:] = [' '] * (self.cols - self.c)
                                 self.dim[self.r][self.c:] = [False] * (self.cols - self.c)
                             elif p1 == 1:
-                                self.grid[self.r][:self.c + 1] = [' '] * (self.c + 1)
-                                self.dim[self.r][:self.c + 1] = [False] * (self.c + 1)
+                                end = min(self.c + 1, self.cols)
+                                self.grid[self.r][:end] = [' '] * end
+                                self.dim[self.r][:end] = [False] * end
                             elif p1 == 2:
                                 self.grid[self.r] = [' '] * self.cols
                                 self.dim[self.r] = [False] * self.cols
@@ -2610,6 +2768,7 @@ class VoiceDictator:
 
     def __init__(self):
         self.lock = threading.Lock()
+        self.ensure_lock = threading.Lock()
         self.run_lock = threading.Lock()
         self.proc = None
         self.fd = None
@@ -2623,6 +2782,21 @@ class VoiceDictator:
 
     def _alive(self):
         return self.proc is not None and self.proc.poll() is None and self.fd is not None
+
+    def _write_pty(self, data, raise_err=False):
+        with self.lock:
+            fd = self.fd
+            if fd is None:
+                if raise_err:
+                    raise AgyError('语音听写进程已断开')
+                return False
+            try:
+                os.write(fd, data)
+                return True
+            except OSError:
+                if raise_err:
+                    raise AgyError('语音听写进程已断开')
+                return False
 
     def _mic_accept_loop(self, srv):
         while True:
@@ -2694,6 +2868,10 @@ class VoiceDictator:
                         pass
                     self.fd = None
                 self.proc = None
+        try:
+            proc.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
     def _on_screen_locked(self):
         sess = self.active
@@ -2720,77 +2898,71 @@ class VoiceDictator:
             raise AgyError('agy 还没装好')
         if not os.path.exists(TOKEN_FILE):
             raise AgyError('需要先用 Google 账号登录才能使用 Antigravity 听写')
-        with self.lock:
-            self.used = time.time()
-            if self._alive() and self.ready:
-                return
-            if not self._alive():
-                self._stop_locked('restart')
-                os.makedirs(VOICE_DIR, exist_ok=True)
-                srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                srv.bind(('127.0.0.1', 0))
-                srv.listen(4)
-                port = srv.getsockname()[1]
-                master, slave = pty.openpty()
-                try:
-                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 200, 0, 0))
-                except OSError:
-                    pass
-                env = agy_env()
-                env.pop('GEMINI_API_KEY', None)
-                env['ANTIGRAVITY_MIC'] = '127.0.0.1:%d' % port
-                env['TERM'] = 'xterm-256color'
-                try:
-                    proc = subprocess.Popen(
-                        [agy_path()],
-                        cwd=VOICE_DIR, env=env, stdin=slave, stdout=slave, stderr=slave,
-                        start_new_session=True, close_fds=True,
-                    )
-                except OSError as e:
-                    os.close(master)
-                    os.close(slave)
-                    srv.close()
-                    raise AgyError('没能启动语音听写进程：%s' % e)
-                os.close(slave)
-                screen = VtScreen(40, 200)
-                self.proc, self.fd, self.srv, self.port, self.screen, self.ready = proc, master, srv, port, screen, False
-                threading.Thread(target=self._mic_accept_loop, args=(srv,), daemon=True).start()
-                threading.Thread(target=self._read_pty, args=(proc, master, screen), daemon=True).start()
-                log('voice: started agy pid %d on mic port %d' % (proc.pid, port))
-        deadline = time.time() + timeout
-        trusted = False
-        dismissed = False
-        while time.time() < deadline:
+        with self.ensure_lock:
             with self.lock:
-                if not self._alive():
-                    raise AgyError('语音听写进程启动后退出了')
-                if self.ready:
+                self.used = time.time()
+                if self._alive() and self.ready:
                     return
-                box, status, _, all_txt = self.screen.snapshot()
-                fd = self.fd
-            if 'Do you trust' in all_txt and not trusted:
-                trusted = True
-                try:
-                    os.write(fd, b'\r')
-                except OSError:
-                    pass
-            elif box is not None and '? for shortcuts' in all_txt:
-                if 'esc to dismiss' in all_txt and not dismissed:
-                    dismissed = True
+                if not self._alive():
+                    self._stop_locked('restart')
+                    os.makedirs(VOICE_DIR, exist_ok=True)
+                    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    srv.bind(('127.0.0.1', 0))
+                    srv.listen(4)
+                    port = srv.getsockname()[1]
+                    master, slave = pty.openpty()
                     try:
-                        os.write(fd, b'\x1b')
+                        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 200, 0, 0))
                     except OSError:
                         pass
-                    time.sleep(0.15)
-                    continue
+                    env = agy_env()
+                    env.pop('GEMINI_API_KEY', None)
+                    env['ANTIGRAVITY_MIC'] = '127.0.0.1:%d' % port
+                    env['TERM'] = 'xterm-256color'
+                    try:
+                        proc = subprocess.Popen(
+                            [agy_path()],
+                            cwd=VOICE_DIR, env=env, stdin=slave, stdout=slave, stderr=slave,
+                            start_new_session=True, close_fds=True,
+                        )
+                    except OSError as e:
+                        os.close(master)
+                        os.close(slave)
+                        srv.close()
+                        raise AgyError('没能启动语音听写进程：%s' % e)
+                    os.close(slave)
+                    screen = VtScreen(40, 200)
+                    self.proc, self.fd, self.srv, self.port, self.screen, self.ready = proc, master, srv, port, screen, False
+                    threading.Thread(target=self._mic_accept_loop, args=(srv,), daemon=True).start()
+                    threading.Thread(target=self._read_pty, args=(proc, master, screen), daemon=True).start()
+                    log('voice: started agy pid %d on mic port %d' % (proc.pid, port))
+            deadline = time.time() + timeout
+            trusted = False
+            dismissed = False
+            while time.time() < deadline:
                 with self.lock:
-                    self.ready = True
-                log('voice: agy dictation ready')
-                return
-            time.sleep(0.1)
-        self.stop('startup timeout')
-        raise AgyError('Antigravity 听写启动超时，请重试')
+                    if not self._alive():
+                        raise AgyError('语音听写进程启动后退出了')
+                    if self.ready:
+                        return
+                    box, status, _, all_txt = self.screen.snapshot()
+                if 'Do you trust' in all_txt and not trusted:
+                    trusted = True
+                    self._write_pty(b'\r')
+                elif box is not None and '? for shortcuts' in all_txt:
+                    if 'esc to dismiss' in all_txt and not dismissed:
+                        dismissed = True
+                        self._write_pty(b'\x1b')
+                        time.sleep(0.15)
+                        continue
+                    with self.lock:
+                        self.ready = True
+                    log('voice: agy dictation ready')
+                    return
+                time.sleep(0.1)
+            self.stop('startup timeout')
+            raise AgyError('Antigravity 听写启动超时，请重试')
 
     def warm(self):
         if not os.path.exists(agy_path()) or not os.path.exists(TOKEN_FILE):
@@ -2817,13 +2989,7 @@ class VoiceDictator:
         return False
 
     def _abort_active(self):
-        with self.lock:
-            fd = self.fd
-        if fd is not None:
-            try:
-                os.write(fd, b'\x1b')
-            except OSError:
-                pass
+        self._write_pty(b'\x1b')
         if not self._wait_idle(3.0):
             self.stop('stuck after cancel')
             return
@@ -2831,26 +2997,22 @@ class VoiceDictator:
 
     def _clear_prompt(self):
         with self.lock:
-            fd = self.fd
             screen = self.screen
-        if fd is None or screen is None:
-            return
-        with self.lock:
+            if self.fd is None or screen is None:
+                return
             box, _, _, _ = screen.snapshot()
         if not box:
             return
-        try:
-            os.write(fd, b'\x1f')  # Ctrl+_ undo dictation
-        except OSError:
+        if not self._write_pty(b'\x1f'):  # Ctrl+_ undo dictation
             return
         time.sleep(0.15)
         with self.lock:
+            screen = self.screen
+            if screen is None:
+                return
             box, _, _, _ = screen.snapshot()
         if box:
-            try:
-                os.write(fd, b'\x01\x0b\x15')  # Ctrl+A Ctrl+K Ctrl+U
-            except OSError:
-                pass
+            self._write_pty(b'\x01\x0b\x15')  # Ctrl+A Ctrl+K Ctrl+U
             time.sleep(0.15)
 
     def cancel(self, vid=None):
@@ -2862,11 +3024,11 @@ class VoiceDictator:
             sess['eof'].set()
             sess['close_mic'].set()
             fd = self.fd
-        if fd is not None:
-            try:
-                os.write(fd, b'\x1b')
-            except OSError:
-                pass
+            if fd is not None:
+                try:
+                    os.write(fd, b'\x1b')
+                except OSError:
+                    pass
         return True
 
     def transcribe(self, rfile, vid):
@@ -2930,11 +3092,7 @@ class VoiceDictator:
                 self._clear_prompt()
                 if sess['cancelled'].is_set():
                     return {'ok': True, 'text': '', 'cancelled': True}
-                with self.lock:
-                    fd = self.fd
-                if fd is None:
-                    raise AgyError('语音听写进程已断开')
-                os.write(fd, b'\x1b[15~')  # F5: start dictation
+                self._write_pty(b'\x1b[15~', raise_err=True)  # F5: start dictation
                 # Wait for audio stream EOF (user released button / tapped stop) or cancel
                 while not sess['eof'].is_set() and not sess['cancelled'].is_set():
                     with self.lock:
@@ -2963,10 +3121,7 @@ class VoiceDictator:
                     if 'Recording' not in st and 'Connecting' not in st and 'Finishing' not in st and sess['recording']:
                         sess['finished'].set()
                 if not sess['finished'].is_set():
-                    try:
-                        os.write(fd, b'\r')  # Enter: finish & insert transcript
-                    except OSError:
-                        pass
+                    self._write_pty(b'\r')  # Enter: finish & insert transcript
                 sess['finished'].wait(timeout=10.0)
                 time.sleep(0.15)
                 sess['close_mic'].set()
@@ -3024,13 +3179,25 @@ class VoiceDictator:
                 pass
         if proc is not None:
             log('voice: stopping agy pid %d (%s)' % (proc.pid, reason))
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except OSError:
+            def _reap(p):
+                for sig in (signal.SIGTERM, signal.SIGKILL):
+                    try:
+                        os.killpg(p.pid, sig)
+                    except OSError:
+                        try:
+                            p.send_signal(sig)
+                        except OSError:
+                            pass
+                    try:
+                        p.wait(3)
+                        return
+                    except subprocess.TimeoutExpired:
+                        pass
                 try:
-                    proc.terminate()
+                    p.wait()
                 except OSError:
                     pass
+            threading.Thread(target=_reap, args=(proc,), daemon=True).start()
 
     def stop(self, reason=''):
         self.cancel()
@@ -3296,6 +3463,7 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, {'ok': True, 'cancelled': voice_dictator.cancel(vid)})
 
     def voice_audio(self):
+        self.close_connection = True
         q = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
         vid = q.get('id') or uuid.uuid4().hex[:8]
         result = voice_dictator.transcribe(self.rfile, vid)
@@ -3464,19 +3632,49 @@ def replace_running_bridge():
     os.replace(part, PID_FILE)
 
 
+_log_fp = None
+_log_bytes = 0
+_log_path = None
+
+
 def log(text):
+    global _log_fp, _log_bytes, _log_path
     with log_lock:
         try:
-            if os.path.getsize(LOG_FILE) > 200_000:
-                os.replace(LOG_FILE, LOG_FILE + '.1')
+            if _log_fp is None or _log_path != LOG_FILE:
+                if _log_fp is not None:
+                    try:
+                        _log_fp.close()
+                    except OSError:
+                        pass
+                    _log_fp = None
+                os.makedirs(os.path.dirname(LOG_FILE) or STATE_DIR, exist_ok=True)
+                try:
+                    _log_bytes = os.path.getsize(LOG_FILE)
+                except OSError:
+                    _log_bytes = 0
+                _log_fp = open(LOG_FILE, 'a', encoding='utf-8', errors='replace')
+                _log_path = LOG_FILE
+            if _log_bytes > 200_000:
+                _log_fp.close()
+                _log_fp = None
+                try:
+                    os.replace(LOG_FILE, LOG_FILE + '.1')
+                except OSError:
+                    pass
+                _log_fp = open(LOG_FILE, 'a', encoding='utf-8', errors='replace')
+                _log_bytes = 0
+            line = time.strftime('%Y-%m-%d %H:%M:%S ') + text + '\n'
+            _log_fp.write(line)
+            _log_fp.flush()
+            _log_bytes += len(line.encode('utf-8', 'replace'))
         except OSError:
-            pass
-        try:
-            os.makedirs(STATE_DIR, exist_ok=True)
-            with open(LOG_FILE, 'a') as f:
-                f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + text + '\n')
-        except OSError:
-            pass
+            if _log_fp is not None:
+                try:
+                    _log_fp.close()
+                except OSError:
+                    pass
+                _log_fp = None
 
 
 def main():
@@ -3521,10 +3719,12 @@ def main():
     except OSError as e:
         log('exit pid %d: cannot listen on %s: %s' % (os.getpid(), args.socket, e))
         sys.exit('cannot listen on %s: %s' % (args.socket, e))
+    def startup_warm():
+        warm()
+        find_models()
     threading.Thread(target=reaper, daemon=True).start()
-    threading.Thread(target=warm, daemon=True).start()
+    threading.Thread(target=startup_warm, daemon=True).start()
     threading.Thread(target=find_agy_info, daemon=True).start()
-    threading.Thread(target=find_models, daemon=True).start()
     server.serve_forever()
 
 

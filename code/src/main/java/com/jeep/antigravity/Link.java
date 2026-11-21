@@ -83,6 +83,7 @@ final class Link extends Part {
             String error = null;
             try {
                 userland.install(p -> ui.post(() -> {
+                    if (app.isFinishing() || app.isDestroyed()) return;
                     installStatus = p;
                     if ("install".equals(setup) && app.screen.emptyView.getVisibility() == View.VISIBLE) app.screen.fillEmpty();
                 }));
@@ -91,6 +92,7 @@ final class Link extends Part {
             }
             String err = error;
             ui.post(() -> {
+                if (app.isFinishing() || app.isDestroyed()) return;
                 installing = false;
                 if (err != null) {
                     setup = "installFailed";

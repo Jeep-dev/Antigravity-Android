@@ -16,6 +16,8 @@ import android.widget.LinearLayout;
 final class SheetBox extends LinearLayout {
     /** Closes the sheet (moving the rest of the way down). */
     Runnable close;
+    /** True once the sheet has started its dismiss animation; ignores further touches. */
+    boolean leaving;
     private final int slop;
     private float downX, downY;
     private boolean dragging;
@@ -28,6 +30,7 @@ final class SheetBox extends LinearLayout {
     }
 
     @Override public boolean onInterceptTouchEvent(MotionEvent e) {
+        if (leaving) return false;
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 downX = e.getRawX();
@@ -66,6 +69,7 @@ final class SheetBox extends LinearLayout {
     }
 
     @Override public boolean onTouchEvent(MotionEvent e) {
+        if (leaving) return false;
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 downX = e.getRawX();

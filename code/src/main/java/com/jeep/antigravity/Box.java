@@ -216,21 +216,42 @@ final class Box extends Part {
 
     void hideMenu() { slashScroll.setVisibility(View.GONE); }
 
+    private Boolean lastStop, lastLive;
+    private String lastModelLabel;
+    private android.view.View lastSendBtn;
+
     /** The send button as the box stands (text written or a file waiting; a reply running; linked or not), and the files waiting. */
     void update() {
         boolean typed = input.getText().toString().trim().length() > 0 || !app.current.attachments.isEmpty();
         boolean canSend = app.link.linked && typed;
         // Plain icons, no filled button: Enter to send, a ringed square to stop the reply.
         boolean stop = app.current.running && !typed;
-        sendBtn.setImageResource(stop ? R.drawable.ic_stop_circle : R.drawable.ic_enter);
         boolean live = stop || canSend;
-        // On the same faint fill as + and the mic while there is nothing to send; solid in the text's colour
-        // (white on dark) when there is, as the claude.ai app's round button.
-        sendBtn.setImageTintList(android.content.res.ColorStateList.valueOf(live ? col(R.color.bg) : col(R.color.text3)));
-        sendBtn.setBackground(Ui.press(app, Ui.round(live ? col(R.color.text) : fill(app), dp(BUTTON / 2)), dp(BUTTON / 2)));
-        sendBtn.setEnabled(live);
-        sendBtn.setPadding(dp(7.5f), dp(7.5f), dp(7.5f), dp(7.5f));
-        modelChip.setText(app.pickers.modelLabel());
+        boolean freshBtn = lastSendBtn != sendBtn;
+        if (freshBtn) {
+            lastSendBtn = sendBtn;
+            lastStop = null;
+            lastLive = null;
+            lastModelLabel = null;
+            sendBtn.setPadding(dp(7.5f), dp(7.5f), dp(7.5f), dp(7.5f));
+        }
+        if (lastStop == null || lastStop != stop) {
+            lastStop = stop;
+            sendBtn.setImageResource(stop ? R.drawable.ic_stop_circle : R.drawable.ic_enter);
+        }
+        if (lastLive == null || lastLive != live) {
+            lastLive = live;
+            // On the same faint fill as + and the mic while there is nothing to send; solid in the text's colour
+            // (white on dark) when there is, as the claude.ai app's round button.
+            sendBtn.setImageTintList(android.content.res.ColorStateList.valueOf(live ? col(R.color.bg) : col(R.color.text3)));
+            sendBtn.setBackground(Ui.press(app, Ui.round(live ? col(R.color.text) : fill(app), dp(BUTTON / 2)), dp(BUTTON / 2)));
+            sendBtn.setEnabled(live);
+        }
+        String label = app.pickers.modelLabel();
+        if (!label.equals(lastModelLabel)) {
+            lastModelLabel = label;
+            modelChip.setText(label);
+        }
         renderAttachments();
     }
 

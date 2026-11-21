@@ -134,10 +134,13 @@ public final class MainActivity extends Activity implements Bridge.Events {
         super.onResume();
         link.resume();
         voice.warm(); // the mic listens at once when pressed
+        ui.removeCallbacks(ticker);
+        ui.postDelayed(ticker, 120);
     }
 
     @Override protected void onPause() {
         super.onPause();
+        ui.removeCallbacks(ticker);
         link.pause();
         voice.pause();
     }
@@ -168,7 +171,7 @@ public final class MainActivity extends Activity implements Bridge.Events {
         screen.placeImmersive(); // the drawer too, now that it is there
         frame.setListener(() -> {
             box.hideKeyboard();
-            drawer.loadSessions();
+            drawer.onOpen();
         });
         setContentView(frame);
     }
@@ -202,6 +205,7 @@ public final class MainActivity extends Activity implements Bridge.Events {
 
     void renderNow() {
         screen.adapter.show(current, false);
+        if (finder.finding()) finder.sync();
         boolean empty = current.messages.isEmpty() && !current.running;
         screen.emptyView.setVisibility(empty ? View.VISIBLE : View.GONE);
         if (empty) screen.fillEmpty();

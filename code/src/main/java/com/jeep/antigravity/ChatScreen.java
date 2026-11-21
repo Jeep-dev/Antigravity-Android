@@ -405,6 +405,7 @@ final class ChatScreen extends Part {
             // From far up, most of the way at once (as to the top): a smooth scroll through it all takes too long.
             if (lm.findLastVisibleItemPosition() < count - 7) lm.scrollToPosition(count - 7);
             list.post(() -> {
+                if (!stick || list.getScrollState() == RecyclerView.SCROLL_STATE_DRAGGING) return;
                 int last = adapter.getItemCount() - 1;
                 if (last < 0) return;
                 toEnd = true;

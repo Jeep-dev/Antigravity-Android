@@ -117,6 +117,7 @@ final class AppPage extends Part {
         new Thread(() -> {
             int state = KeepAlive.ensure(userland, pkg);
             ui.post(() -> {
+                if (app.isFinishing() || app.isDestroyed()) return;
                 keepChecking = false;
                 keepAlive = state;
                 if (state == KeepAlive.SET) toast("已开启后台保活");
@@ -177,19 +178,24 @@ final class AppPage extends Part {
     }
 
     void logSheet() {
-        String bridgeLog = Userland.tail(userland.file(Userland.HOME + "/.agyapp/bridge.log"), 16_000);
-        String runLog = Userland.tail(userland.log, 8_000);
-        String text = "== bridge.log ==\n" + (bridgeLog.isEmpty() ? "（空）\n" : bridgeLog) + "\n== 启动 ==\n" + (runLog.isEmpty() ? "（空）\n" : runLog);
-        Dialog sheet = sheets.sheet("日志", null);
-        TextView t = Ui.text(app, text, 11.5f, R.color.text);
-        t.setTypeface(Ui.MONO);
-        t.setTextIsSelectable(true);
-        sheets.content(sheet).addView(t, Ui.fill());
-        TextView cp = sheets.button("复制全部", false, v -> app.copy(text));
-        sheets.content(sheet).addView(cp);
-        Ui.margins(cp, app, 0, 12, 0, 0);
-        sheet.show();
-        ScrollView scroll = (ScrollView) sheets.content(sheet).getParent();
-        scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
+        work.execute(() -> {
+            String bridgeLog = Userland.tail(userland.file(Userland.HOME + "/.agyapp/bridge.log"), 16_000);
+            String runLog = Userland.tail(userland.log, 8_000);
+            String text = "== bridge.log ==\n" + (bridgeLog.isEmpty() ? "（空）\n" : bridgeLog) + "\n== 启动 ==\n" + (runLog.isEmpty() ? "（空）\n" : runLog);
+            ui.post(() -> {
+                if (app.isFinishing() || app.isDestroyed()) return;
+                Dialog sheet = sheets.sheet("日志", null);
+                TextView t = Ui.text(app, text, 11.5f, R.color.text);
+                t.setTypeface(Ui.MONO);
+                t.setTextIsSelectable(true);
+                sheets.content(sheet).addView(t, Ui.fill());
+                TextView cp = sheets.button("复制全部", false, v -> app.copy(text));
+                sheets.content(sheet).addView(cp);
+                Ui.margins(cp, app, 0, 12, 0, 0);
+                sheet.show();
+                ScrollView scroll = (ScrollView) sheets.content(sheet).getParent();
+                scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
+            });
+        });
     }
 }

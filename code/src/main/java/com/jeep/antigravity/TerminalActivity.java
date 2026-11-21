@@ -68,6 +68,7 @@ public final class TerminalActivity extends Activity implements TerminalSessionC
         root.addView(keys(), new LinearLayout.LayoutParams(-1, Ui.dp(this, 40)));
         setContentView(root);
 
+        shown = this;
         if (session != null && session.isRunning()) {
             session.updateTerminalSessionClient(this);
             attach();
@@ -75,31 +76,34 @@ public final class TerminalActivity extends Activity implements TerminalSessionC
         }
         if (starting) return;
         starting = true;
+        android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
         // Getting the userland ready writes files (and may copy Shizuku's dex): not on the main thread.
         new Thread(() -> {
             List<String> cmd;
             try {
                 cmd = userland.command("/bin/bash", "-l");
             } catch (IOException e) {
-                runOnUiThread(() -> {
+                main.post(() -> {
                     starting = false;
-                    if (isFinishing() || isDestroyed()) return;
-                    Toast.makeText(this, "启动终端失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
-                    finish();
+                    TerminalActivity target = shown;
+                    if (target == null || target.isFinishing() || target.isDestroyed()) return;
+                    Toast.makeText(target, "启动终端失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
+                    target.finish();
                 });
                 return;
             }
-            runOnUiThread(() -> {
+            main.post(() -> {
                 starting = false;
-                if (isFinishing() || isDestroyed()) return;
+                TerminalActivity target = shown;
+                if (target == null || target.isFinishing() || target.isDestroyed()) return;
                 if (session != null && session.isRunning()) {
-                    session.updateTerminalSessionClient(this);
-                    attach();
+                    session.updateTerminalSessionClient(target);
+                    target.attach();
                     return;
                 }
                 session = new TerminalSession(cmd.get(0), userland.base.getPath(), cmd.toArray(new String[0]),
-                        userland.env(), 3000, this);
-                attach();
+                        userland.env(), 3000, target);
+                target.attach();
             });
         }, "terminal-start").start();
     }
@@ -212,7 +216,7 @@ public final class TerminalActivity extends Activity implements TerminalSessionC
         k.setGravity(Gravity.CENTER);
         k.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 14), 0);
         k.setMinWidth(Ui.dp(this, 44));
-        k.setOnClickListener(v -> { if (shown == this) action.run(); }); // once the shell is up
+        k.setOnClickListener(v -> { if (shown == this && session != null) action.run(); }); // once the shell is up
         row.addView(k, new LinearLayout.LayoutParams(-2, -1));
         return k;
     }

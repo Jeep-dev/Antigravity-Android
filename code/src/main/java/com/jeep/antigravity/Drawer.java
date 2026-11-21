@@ -247,24 +247,47 @@ final class Drawer extends Part {
         return s / (365 * day) + "y";
     }
 
-    private static String group(double mtime) {
+    private boolean sessionsDirty;
+
+    void onOpen() {
+        if (sessionsDirty) renderSessions();
+        loadSessions();
+    }
+
+    private static long startOfTodayMs() {
         Calendar start = Calendar.getInstance();
         start.set(Calendar.HOUR_OF_DAY, 0);
         start.set(Calendar.MINUTE, 0);
         start.set(Calendar.SECOND, 0);
-        long t = (long) (mtime * 1000), s = start.getTimeInMillis(), day = 86_400_000L;
-        if (t >= s) return "今天";
-        if (t >= s - day) return "昨天";
-        if (t >= s - 7 * day) return "过去 7 天";
-        if (t >= s - 30 * day) return "过去 30 天";
+        start.set(Calendar.MILLISECOND, 0);
+        return start.getTimeInMillis();
+    }
+
+    private static String group(double mtime, long todayStart) {
+        long t = (long) (mtime * 1000), day = 86_400_000L;
+        if (t >= todayStart) return "今天";
+        if (t >= todayStart - day) return "昨天";
+        if (t >= todayStart - 7 * day) return "过去 7 天";
+        if (t >= todayStart - 30 * day) return "过去 30 天";
         return "更早";
     }
 
     void renderSessions() {
         if (sessionsBox == null) return;
+        if (app.frame != null && !app.frame.isOpen()) {
+            sessionsDirty = true;
+            return;
+        }
+        sessionsDirty = false;
         drawnState = drawerState();
         sessionsBox.removeAllViews();
         String q = search.trim().toLowerCase(Locale.ROOT);
+        java.util.regex.Pattern qPat = q.isEmpty() ? null : java.util.regex.Pattern.compile(
+                java.util.regex.Pattern.quote(q),
+                java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE);
+        long todayStart = startOfTodayMs();
+        boolean showTimes = prefs.getBoolean("drawerTimes", true);
+        int timeCol = -1;
         String group = "";
         int shown = 0;
         // Only the working folder's (Settings → 外观 → 只显示当前目录): new conversations' folder, not its subfolders.
@@ -283,7 +306,7 @@ final class Drawer extends Part {
             if (!here.isEmpty() && !normPath(folder).equals(here)) continue;
             boolean byName = titleText.toLowerCase(Locale.ROOT).contains(q) || folder.toLowerCase(Locale.ROOT).contains(q);
             if (!q.isEmpty() && !byName && !hits.containsKey(id)) continue;
-            String g = pins.contains(id) ? "置顶" : group(s.optDouble("mtime"));
+            String g = pins.contains(id) ? "置顶" : group(s.optDouble("mtime"), todayStart);
             if (!g.equals(group)) {
                 group = g;
                 // As Settings' headings: the accent, close under the search, apart from a group above.
@@ -314,12 +337,10 @@ final class Drawer extends Part {
             TextView meta = Ui.text(app, Ui.base(folder), 12.5f, R.color.text3);
             meta.setPadding(0, dp(3), 0, 0);
             meta.setSingleLine(true);
-            if (!q.isEmpty() && !byName) { // found in what was said: show where
+            if (qPat != null && !byName) { // found in what was said: show where
                 String snip = hits.get(id);
                 SpannableStringBuilder sb = new SpannableStringBuilder(snip);
-                java.util.regex.Matcher hit = java.util.regex.Pattern.compile(
-                        java.util.regex.Pattern.quote(q),
-                        java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE).matcher(snip);
+                java.util.regex.Matcher hit = qPat.matcher(snip);
                 if (hit.find()) sb.setSpan(new ForegroundColorSpan(col(R.color.text)), hit.start(), hit.end(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                 meta.setText(sb);
                 meta.setEllipsize(TextUtils.TruncateAt.END);
@@ -329,13 +350,13 @@ final class Drawer extends Part {
             // Shown unless turned off (Settings → 外观 → 对话时间).
             LinearLayout under = Ui.row(app);
             under.addView(meta, Ui.weight());
-            if (prefs.getBoolean("drawerTimes", true)) {
+            if (showTimes) {
                 TextView when = Ui.text(app, ago(s.optDouble("mtime")), 11.5f, R.color.text3);
                 when.setFontFeatureSettings("tnum");
                 when.setSingleLine(true);
                 when.setPadding(0, dp(3), 0, 0);
-                int column = (int) Math.ceil(when.getPaint().measureText("88mo"));
-                under.addView(when, new LinearLayout.LayoutParams(column + dp(2), -2));
+                if (timeCol < 0) timeCol = (int) Math.ceil(when.getPaint().measureText("88mo")) + dp(2);
+                under.addView(when, new LinearLayout.LayoutParams(timeCol, -2));
                 Ui.margins(when, app, 10, 0, 0, 0);
             }
             item.addView(under, Ui.fill());

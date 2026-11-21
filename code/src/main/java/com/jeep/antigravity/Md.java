@@ -127,8 +127,12 @@ final class Md {
                 i = j - 1;
                 continue;
             }
-            Matcher m = FENCE.matcher(lines[i]);
-            if (!m.matches() || (m.group(1).startsWith("`") && lines[i].substring(m.end(1)).contains("`"))) {
+            String ln = lines[i];
+            int k = 0;
+            while (k < ln.length() && ln.charAt(k) == ' ') k++;
+            char firstCh = k < ln.length() ? ln.charAt(k) : 0;
+            Matcher m = (firstCh == '`' || firstCh == '~') ? FENCE.matcher(ln) : null;
+            if (m == null || !m.matches() || (m.group(1).startsWith("`") && ln.substring(m.end(1)).contains("`"))) {
                 prose.append(lines[i]).append('\n');
                 if (lines[i].contains("![") || lines[i].contains("file://")) {
                     List<String[]> found = new ArrayList<>();
@@ -296,7 +300,7 @@ final class Md {
                 cell.setGravity(a.startsWith(":") && a.endsWith(":") ? android.view.Gravity.CENTER_HORIZONTAL
                         : a.endsWith(":") ? android.view.Gravity.END : android.view.Gravity.START);
                 String md = k < cells.size() ? cells.get(k) : "";
-                cell.setTypeface(i == 0 ? android.graphics.Typeface.create(Fonts.body(c), android.graphics.Typeface.BOLD) : Fonts.body(c));
+                cell.setTypeface(i == 0 ? boldBody() : Fonts.body(c));
                 if (!md.equals(cell.getTag(R.id.markdown)) || cell.getTag(R.id.font) == null || (int) cell.getTag(R.id.font) != fontGen) {
                     cell.setTag(R.id.font, fontGen);
                     cell.setTag(R.id.markdown, md);
@@ -307,6 +311,17 @@ final class Md {
             r++;
         }
         while (t.getChildCount() > r) t.removeViewAt(r);
+    }
+
+    private android.graphics.Typeface cachedBold;
+    private int cachedBoldGen = -1;
+
+    private android.graphics.Typeface boldBody() {
+        if (cachedBold == null || cachedBoldGen != fontGen) {
+            cachedBold = android.graphics.Typeface.create(Fonts.body(c), android.graphics.Typeface.BOLD);
+            cachedBoldGen = fontGen;
+        }
+        return cachedBold;
     }
 
     /** What a table cell shows: its Markdown rendered, without the line ends after it. */

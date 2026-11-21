@@ -213,7 +213,7 @@ final class LookPage extends Part {
             }
             String safe = name.replaceAll("[/\\\\]", "_");
             if (!safe.toLowerCase(Locale.ROOT).matches(".*\\.(ttf|otf|ttc)$")) {
-                ui.post(() -> toast("只支持 ttf、otf、ttc"));
+                ui.post(() -> { if (!app.isFinishing() && !app.isDestroyed()) toast("只支持 ttf、otf、ttc"); });
                 return;
             }
             java.io.File out = new java.io.File(Fonts.dir(app), safe);

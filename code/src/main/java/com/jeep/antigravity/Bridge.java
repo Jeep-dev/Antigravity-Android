@@ -340,7 +340,7 @@ final class Bridge {
         submit(() -> {
             String result;
             String why = restart ? "restart asked in the app" : isUp();
-            if (why == null) result = "ok";
+            if (why == null) { startedAt = 0; result = "ok"; }
             else if (!userland.ready()) result = "install";
             else if (startedAt != 0 && android.os.SystemClock.elapsedRealtime() - startedAt < 30_000 && !restart) result = waitUntilUp(0);
             else {
@@ -348,6 +348,7 @@ final class Bridge {
                 run(why);
                 result = waitUntilUp(oldStarted);
             }
+            if ("ok".equals(result)) startedAt = 0;
             if ("ok".equals(result) && !closed && reading.compareAndSet(false, true)) submit(this::readEvents);
             String r = result;
             postUi(() -> done.accept(r));

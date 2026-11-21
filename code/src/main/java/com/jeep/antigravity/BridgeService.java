@@ -158,7 +158,21 @@ public final class BridgeService extends Service {
         }
         int pid = userland.bridgePid();
         if (pid > 0) android.os.Process.sendSignal(pid, 15);
-        if (p == null) return;
+        if (p == null) {
+            if (pid <= 0) return;
+            try {
+                long end = System.currentTimeMillis() + 6_000;
+                while (System.currentTimeMillis() < end && userland.bridgePid() == pid) Thread.sleep(100);
+                if (userland.bridgePid() == pid) {
+                    android.os.Process.sendSignal(pid, 9);
+                    long killEnd = System.currentTimeMillis() + 2_000;
+                    while (System.currentTimeMillis() < killEnd && userland.bridgePid() == pid) Thread.sleep(100);
+                }
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            return;
+        }
         if (pid <= 0) {
             p.destroyForcibly();
             return;

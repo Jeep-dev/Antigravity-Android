@@ -100,6 +100,23 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
             return;
         }
         List<Item> prev = items;
+        if (prev.size() == next.size()) {
+            int changedIdx = -1;
+            boolean sameStructure = true;
+            for (int i = 0; i < prev.size(); i++) {
+                Item o = prev.get(i), n = next.get(i);
+                if (o.id != n.id || o.gap != n.gap) { sameStructure = false; break; }
+                if (o.sig != n.sig) {
+                    if (changedIdx >= 0) { sameStructure = false; break; }
+                    changedIdx = i;
+                }
+            }
+            if (sameStructure) {
+                items = next;
+                if (changedIdx >= 0) notifyItemChanged(changedIdx);
+                return;
+            }
+        }
         DiffUtil.DiffResult diff = DiffUtil.calculateDiff(new DiffUtil.Callback() {
             @Override public int getOldListSize() { return prev.size(); }
             @Override public int getNewListSize() { return next.size(); }
@@ -110,6 +127,14 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
         }, false);
         items = next;
         diff.dispatchUpdatesTo(this);
+    }
+
+    private static boolean isBlank(String s) {
+        if (s == null) return true;
+        for (int i = 0; i < s.length(); i++) {
+            if (!Character.isWhitespace(s.charAt(i))) return false;
+        }
+        return true;
     }
 
     private static List<Item> flatten(Chat chat, boolean thinking) {
@@ -125,7 +150,7 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
                 Chat.Block prev = null;
                 for (Chat.Block b : m.blocks) {
                     // The model may send a thinking block with nothing in it: once it ends, there is nothing to show.
-                    if (b.kind == Chat.Block.THINKING && !b.streaming && b.text.trim().isEmpty()) continue;
+                    if (b.kind == Chat.Block.THINKING && !b.streaming && isBlank(b.text)) continue;
                     // Thinking can be left out altogether (a setting), whatever the model.
                     if (b.kind == Chat.Block.THINKING && !thinking) continue;
                     // Thinking in progress is the status row's "思考中… Ns"; tapping that opens it here.
@@ -224,6 +249,7 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
         }
         if (same && it.type == THINKING && h.thinkOpen == it.block.open) { // same: no rebuild, no jump
             h.box.setPadding(0, Ui.dp(c, it.gap), 0, 0);
+            if (h.thinkScroll != null && !it.block.streaming) h.thinkScroll.follow = false;
             h.thinkLabel.setText(thinkingLabel(it.block));
             String text = thinkingText(it.block);
             if (h.thinkBody != null && !text.contentEquals(h.thinkBody.getText())) {
@@ -1157,14 +1183,20 @@ final class ThreadAdapter extends RecyclerView.Adapter<ThreadAdapter.Holder> {
     private void tick(Holder h) {
         if (chat == null || h.glyph == null) return;
         long now = System.currentTimeMillis();
-        h.glyph.setText(GLYPHS[(int) (now / 120 % GLYPHS.length)]);
-        h.verb.setText(chat.verb + "…");
+        String g = GLYPHS[(int) (now / 120 % GLYPHS.length)];
+        if (!g.contentEquals(h.glyph.getText())) h.glyph.setText(g);
+        String v = chat.verb + "…";
+        if (!v.contentEquals(h.verb.getText())) h.verb.setText(v);
         long secs = (now - (chat.startedAt == 0 ? now : chat.startedAt)) / 1000;
-        h.elapsed.setText(secs > 0 ? secs + "s" : "");
+        String el = secs > 0 ? secs + "s" : "";
+        if (!el.contentEquals(h.elapsed.getText())) h.elapsed.setText(el);
         String detail = chat.detail; // retries
-        h.detail.setText(detail);
-        h.detail.setVisibility(detail.isEmpty() ? View.GONE : View.VISIBLE);
-        h.detail.setTextColor(Ui.color(c, detail.isEmpty() ? R.color.text3 : R.color.warn));
+        if (!detail.contentEquals(h.detail.getText())) h.detail.setText(detail);
+        int vis = detail.isEmpty() ? View.GONE : View.VISIBLE;
+        if (h.detail.getVisibility() != vis) {
+            h.detail.setVisibility(vis);
+            h.detail.setTextColor(Ui.color(c, detail.isEmpty() ? R.color.text3 : R.color.warn));
+        }
     }
 
     private Chat.Block streamingThinking() {

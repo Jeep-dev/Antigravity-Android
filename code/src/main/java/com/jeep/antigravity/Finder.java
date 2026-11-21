@@ -118,27 +118,65 @@ final class Finder extends Part {
         return -1;
     }
 
+    /** Re-syncs cached hit positions when the conversation list mutates while /find is active. */
+    void sync() {
+        if (findQuery.isEmpty()) return;
+        int prevRow = findAt < findHits.size() ? findHits.get(findAt)[0] : -1;
+        int prevK = findAt < findHits.size() ? findHits.get(findAt)[1] : 0;
+        findHits.clear();
+        for (int p = 0; p < app.screen.adapter.getItemCount(); p++) {
+            List<String> texts = app.screen.adapter.searchText(p);
+            if (texts == null) continue;
+            int k = 0;
+            for (String text : texts) {
+                for (int i = indexOfIgnoreCase(text, findQuery, 0); i >= 0; i = indexOfIgnoreCase(text, findQuery, i + findQuery.length())) {
+                    findHits.add(new int[]{p, k++});
+                }
+            }
+        }
+        if (findHits.isEmpty()) {
+            findEnd();
+            return;
+        }
+        int best = Math.min(findAt, findHits.size() - 1);
+        for (int i = 0; i < findHits.size(); i++) {
+            int[] h = findHits.get(i);
+            if (h[0] == prevRow && h[1] == prevK) { best = i; break; }
+        }
+        findAt = Math.max(0, best);
+    }
+
     /** Marks the places found in a row, the one gone to darker; or takes the marks away. */
     void mark(View row, int position) {
         boolean marked = !findQuery.isEmpty() && app.screen.adapter.searchable(position);
+        if (!marked && row.getTag(R.id.findable) == null) return;
         int[] at = finding() ? findHits.get(findAt) : null;
         List<TextView> texts = new ArrayList<>();
         findTexts(row, texts);
         int n = 0;
+        boolean anyMarked = false;
         for (TextView t : texts) {
-            // A message's own text is plain (a user's, code): made one that takes marks.
+            CharSequence cur = t.getText();
+            if (cur instanceof android.text.Spannable) {
+                android.text.Spannable s = (android.text.Spannable) cur;
+                for (Found f : s.getSpans(0, s.length(), Found.class)) s.removeSpan(f);
+            }
+            if (!marked) continue;
+            String raw = cur.toString();
+            int qlen = findQuery.length();
+            int first = indexOfIgnoreCase(raw, findQuery, 0);
+            if (first < 0) continue;
+            // A message's own text is plain (a user's, code): convert to SPANNABLE only when a match exists.
             if (!(t.getText() instanceof android.text.Spannable)) t.setText(t.getText(), TextView.BufferType.SPANNABLE);
             android.text.Spannable s = (android.text.Spannable) t.getText();
-            for (Found f : s.getSpans(0, s.length(), Found.class)) s.removeSpan(f);
-            if (!marked) continue;
-            String raw = s.toString();
-            int qlen = findQuery.length();
-            for (int i = indexOfIgnoreCase(raw, findQuery, 0); i >= 0; i = indexOfIgnoreCase(raw, findQuery, i + qlen), n++) {
+            anyMarked = true;
+            for (int i = first; i >= 0; i = indexOfIgnoreCase(raw, findQuery, i + qlen), n++) {
                 boolean here = at != null && at[0] == position && at[1] == n;
                 s.setSpan(new Found(Glass.alpha(col(R.color.accent), here ? 0.55f : 0.2f)),
                         i, i + qlen, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
         }
+        row.setTag(R.id.findable, anyMarked ? Boolean.TRUE : null);
     }
 
     /** Case-insensitive search keeping exact UTF-16 offsets (unlike toLowerCase, which can expand chars like İ). */

@@ -56,11 +56,17 @@ final class Voice extends Part {
     /** Counts each listening: a restart left over from one ended is not taken by the next. */
     private int session;
     private final Runnable giveUp = this::finish;
+    private final Runnable giveUpAgy = this::cancel;
     /** Active Antigravity native dictation state. */
+    private static final class AgySession {
+        final String id;
+        volatile boolean recording = true;
+        volatile boolean cancelled;
+        volatile LocalSocket socket;
+        AgySession(String id) { this.id = id; }
+    }
     private boolean agyActive, agyConnecting;
-    private String agyId;
-    private volatile boolean agyRecording, agyCancelled;
-    private volatile LocalSocket agySocket;
+    private AgySession agySession;
     /**
      * The sentence as last heard (recognizers send it whole each time), and how much of it was given up to
      * the box: the user edited the box meanwhile, so only what is heard after that goes in, at the cursor
@@ -186,9 +192,11 @@ final class Voice extends Part {
         return prefs.getString("voiceService", "").isEmpty();
     }
 
-    /** The app came to the front: warm agy's dictation process ahead when Antigravity dictation is active. */
+    /** The app came to the front: warm agy's dictation process ahead only if the user has used it. */
     void warm() {
-        if (isAgy() && app.link.linked) bridge.post("/voice/warm", new JSONObject(), null);
+        if (isAgy() && app.link.linked && prefs.getBoolean("voiceUsed", false)) {
+            bridge.post("/voice/warm", new JSONObject(), null);
+        }
     }
 
     /** Starts streaming 16kHz mono PCM to the bridge for agy /voice dictate. */
@@ -197,6 +205,7 @@ final class Voice extends Part {
             toast("后台还没启动好");
             return;
         }
+        if (!prefs.getBoolean("voiceUsed", false)) prefs.edit().putBoolean("voiceUsed", true).apply();
         on = true;
         agyActive = true;
         agyConnecting = true;
@@ -208,17 +217,16 @@ final class Voice extends Part {
         givenUp = 0;
         quiet = 0;
         String vid = UUID.randomUUID().toString().substring(0, 8);
-        agyId = vid;
-        agyRecording = true;
-        agyCancelled = false;
+        AgySession s = new AgySession(vid);
+        agySession = s;
         paint();
-        Thread t = new Thread(() -> runAgy(vid, mySession), "agy-voice");
+        Thread t = new Thread(() -> runAgy(s, mySession), "agy-voice");
         t.setDaemon(true);
         t.start();
     }
 
     @android.annotation.SuppressLint("MissingPermission")
-    private void runAgy(String vid, int mySession) {
+    private void runAgy(AgySession s, int mySession) {
         int sampleRate = 16000;
         int minBuf = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
         int bufSize = Math.max(minBuf > 0 ? minBuf * 2 : 6400, 6400);
@@ -241,12 +249,18 @@ final class Voice extends Part {
         }
         LocalSocket sock = null;
         try {
-            sock = bridge.openStream("/voice/audio?id=" + android.net.Uri.encode(vid), "audio/pcm");
-            agySocket = sock;
+            if (s.cancelled) return;
+            sock = bridge.openStream("/voice/audio?id=" + android.net.Uri.encode(s.id), "audio/pcm");
+            s.socket = sock;
+            if (s.cancelled) {
+                try { sock.close(); } catch (IOException ignored) { /* closed */ }
+                sock = null;
+                return;
+            }
             OutputStream out = sock.getOutputStream();
             recorder.startRecording();
             byte[] pcm = new byte[3200]; // 100 ms of 16kHz 16-bit mono PCM
-            while (agyRecording && !agyCancelled) {
+            while (s.recording && !s.cancelled) {
                 int n = recorder.read(pcm, 0, pcm.length);
                 if (n < 0) break;
                 if (n == 0) continue;
@@ -265,11 +279,11 @@ final class Voice extends Part {
                     }
                 });
             }
-        } catch (IOException e) {
-            boolean cancelled = agyCancelled;
+        } catch (IOException | RuntimeException e) {
+            boolean cancelled = s.cancelled;
             String err = "";
             if (sock != null) {
-                if (!cancelled) {
+                if (!cancelled && e instanceof IOException) {
                     Object[] r = bridge.finishStream(sock);
                     try {
                         err = new JSONObject((String) r[1]).optString("error");
@@ -299,8 +313,8 @@ final class Voice extends Part {
             }
             recorder.release();
         }
-        if (agyCancelled) {
-            try { sock.close(); } catch (IOException ignored) { /* closed */ }
+        if (s.cancelled) {
+            if (sock != null) try { sock.close(); } catch (IOException ignored) { /* closed */ }
             return;
         }
         try {
@@ -328,7 +342,7 @@ final class Voice extends Part {
                 } else if (!heard) {
                     toast(!notice.isEmpty() && !notice.equalsIgnoreCase("No speech detected") ? notice : "没听清，请再说一次");
                 }
-            } else if (!agyCancelled) {
+            } else if (!s.cancelled) {
                 String err = reply.optString("error");
                 toast(err.isEmpty() ? "语音识别失败（" + status + "）" : err);
             }
@@ -338,8 +352,8 @@ final class Voice extends Part {
 
     /** Live updates pushed by the bridge while agy /voice dictate is running. */
     void onBridgeEvent(JSONObject data) {
-        if (!on || !agyActive || data == null) return;
-        if (!data.optString("id").equals(agyId)) return;
+        if (!on || !agyActive || agySession == null || data == null) return;
+        if (!data.optString("id").equals(agySession.id)) return;
         String state = data.optString("state");
         if ("recording".equals(state)) {
             agyConnecting = false;
@@ -408,7 +422,7 @@ final class Voice extends Part {
         String kept = agy || chosen() == null ? "" : prefs.getString("voiceService", "");
         sheets.option(card, 0, "Antigravity 听写", "Google 订阅", false, () -> {
             cancel();
-            prefs.edit().putString("voice", "agy").apply();
+            prefs.edit().putString("voice", "agy").putBoolean("voiceUsed", true).apply();
             warm();
             sheet.dismiss();
             after.run();
@@ -448,8 +462,8 @@ final class Voice extends Part {
         if (agyActive) {
             stopping = true;
             held = false;
-            agyRecording = false;
-            ui.postDelayed(giveUp, 15_000);
+            if (agySession != null) agySession.recording = false;
+            ui.postDelayed(giveUpAgy, 15_000);
             paint();
             return;
         }
@@ -463,16 +477,16 @@ final class Voice extends Part {
 
     /** Ends listening at once (sent, another conversation, the app left): what is written stays. */
     void cancel() {
-        if (agyActive) {
-            String cid = agyId;
-            agyCancelled = true;
-            agyRecording = false;
-            LocalSocket s = agySocket;
-            agySocket = null;
-            if (s != null) {
-                try { s.close(); } catch (IOException ignored) { /* closed */ }
+        if (agyActive && agySession != null) {
+            AgySession s = agySession;
+            s.cancelled = true;
+            s.recording = false;
+            LocalSocket sock = s.socket;
+            s.socket = null;
+            if (sock != null) {
+                try { sock.close(); } catch (IOException ignored) { /* closed */ }
             }
-            if (cid != null) bridge.post("/voice/cancel", obj("id", cid), null);
+            bridge.post("/voice/cancel", obj("id", s.id), null);
         }
         if (rec != null) rec.cancel();
         finish();
@@ -480,12 +494,12 @@ final class Voice extends Part {
 
     private void finish() {
         ui.removeCallbacks(giveUp);
+        ui.removeCallbacks(giveUpAgy);
         if (rec != null) rec.destroy();
         rec = null;
         agyActive = agyConnecting = false;
-        agyRecording = false;
-        agyId = null;
-        agySocket = null;
+        if (agySession != null) agySession.recording = false;
+        agySession = null;
         session++;
         on = held = stopping = between = false;
         paint();

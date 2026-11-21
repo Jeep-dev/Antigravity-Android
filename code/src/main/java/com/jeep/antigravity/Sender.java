@@ -40,12 +40,14 @@ final class Sender extends Part {
 
         @Override public void sendNow(Chat.Queued q) {
             Chat chat = app.current;
-            if (!chat.queue.remove(q)) return;
-            chat.queue.add(0, q);
-            q.now = true;
-            if (chat.running) stop(chat);
-            else sendQueued(chat);
-            app.renderNow();
+            takeBack(chat, q, () -> {
+                if (!chat.queue.remove(q)) return;
+                chat.queue.add(0, q);
+                q.now = true;
+                if (chat.running) stop(chat);
+                else sendQueued(chat);
+                app.renderNow();
+            });
         }
     };
 
@@ -244,10 +246,8 @@ final class Sender extends Part {
                 return;
             }
             if (inserted != null) {
-                // Refused for sure (or the turn already ended): it waits for the reply instead.
-                if (status >= 400 || status == Bridge.REFUSED || !chat.running) {
-                    notInserted(chat, inserted, data.optString("error", String.valueOf(status)));
-                }
+                String why = status == -2 ? "后台没有回应" : status == -1 || status == Bridge.REFUSED ? "连不上后台" : data.optString("error", String.valueOf(status));
+                notInserted(chat, inserted, why);
                 return;
             }
             if (chat.lastEvent > sentAt) return; // it is running after all

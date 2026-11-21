@@ -40,7 +40,7 @@ final class Sheets extends Part {
                     if (!isShowing() || leaving || app.isFinishing() || app.isDestroyed()) return;
                     box.setTranslationY(box.getHeight());
                     box.animate().translationY(0).setDuration(Motion.PAGE).setInterpolator(Motion.EMPHASIZED).start();
-                    dimAnim = dim(w, dimAnim, 0f, SHEET_DIM);
+                    dimAnim = dim(this, w, dimAnim, 0f, SHEET_DIM);
                 });
             }
 
@@ -49,18 +49,36 @@ final class Sheets extends Part {
                 if (leaving) return;
                 if (!isShowing() || app.isFinishing() || app.isDestroyed() || box.getHeight() == 0) {
                     if (dimAnim != null) { dimAnim.cancel(); dimAnim = null; }
+                    box.animate().cancel();
                     try { super.dismiss(); } catch (IllegalArgumentException ignored) {}
                     return;
                 }
                 leaving = true;
-                dimAnim = dim(getWindow(), dimAnim, SHEET_DIM, 0f);
+                box.leaving = true;
+                dimAnim = dim(this, getWindow(), dimAnim, SHEET_DIM, 0f);
+                box.animate().cancel();
                 box.animate().translationY(box.getHeight()).setDuration(250).setInterpolator(Motion.EMPHASIZED)
-                        .withEndAction(() -> {
-                            if (dimAnim != null) { dimAnim.cancel(); dimAnim = null; }
-                            if (isShowing() && !app.isFinishing() && !app.isDestroyed()) {
-                                try { super.dismiss(); } catch (IllegalArgumentException ignored) {}
+                        .setListener(new android.animation.AnimatorListenerAdapter() {
+                            private boolean done;
+                            private void finishDismiss() {
+                                if (done) return;
+                                done = true;
+                                if (dimAnim != null) { dimAnim.cancel(); dimAnim = null; }
+                                if (isShowing() && !app.isFinishing() && !app.isDestroyed()) {
+                                    try { dismissSuper(); } catch (IllegalArgumentException ignored) {}
+                                }
                             }
+                            @Override public void onAnimationEnd(android.animation.Animator animation) { finishDismiss(); }
+                            @Override public void onAnimationCancel(android.animation.Animator animation) { finishDismiss(); }
                         }).start();
+            }
+
+            private void dismissSuper() { super.dismiss(); }
+
+            @Override protected void onStop() {
+                if (dimAnim != null) { dimAnim.cancel(); dimAnim = null; }
+                box.animate().cancel();
+                super.onStop();
             }
         };
         d.requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -119,13 +137,15 @@ final class Sheets extends Part {
         return d;
     }
 
-    private static android.animation.ValueAnimator dim(Window w, android.animation.ValueAnimator prev, float from, float to) {
+    private android.animation.ValueAnimator dim(Dialog d, Window w, android.animation.ValueAnimator prev, float from, float to) {
         if (prev != null) prev.cancel();
         if (w == null) return null;
         android.animation.ValueAnimator a = android.animation.ValueAnimator.ofFloat(from, to);
         a.setDuration(to > from ? Motion.PAGE : 250);
         a.setInterpolator(Motion.EMPHASIZED);
-        a.addUpdateListener(x -> w.setDimAmount((float) x.getAnimatedValue()));
+        a.addUpdateListener(x -> {
+            if (d.isShowing() && !app.isFinishing() && !app.isDestroyed()) w.setDimAmount((float) x.getAnimatedValue());
+        });
         a.start();
         return a;
     }

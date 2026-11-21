@@ -743,8 +743,29 @@ final class Userland {
         for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
     }
 
-    /** A file inside the userland, by its path there. */
-    File file(String path) { return new File(rootfs, path.startsWith("/") ? path.substring(1) : path); }
+    /** A file inside the userland, by its path there (including bind-mounted /sdcard and /storage). */
+    File file(String path) {
+        if (path == null) return rootfs;
+        if (path.equals("/sdcard") || path.startsWith("/sdcard/")) {
+            File ext = android.os.Environment.getExternalStorageDirectory();
+            if (ext != null) {
+                String rel = path.length() > 8 ? path.substring(8) : "";
+                return rel.isEmpty() ? ext : new File(ext, rel);
+            }
+        }
+        if (path.equals("/storage") || path.startsWith("/storage/")) {
+            return new File(path);
+        }
+        File f = new File(rootfs, path.startsWith("/") ? path.substring(1) : path);
+        try {
+            String base = rootfs.getCanonicalPath();
+            String resolved = f.getCanonicalPath();
+            if (!resolved.equals(base) && !resolved.startsWith(base + File.separator)) return rootfs;
+        } catch (IOException ignored) {
+            if (path.contains("..")) return rootfs;
+        }
+        return f;
+    }
 
     /** The running bridge's pid (it writes it), or 0: none, or a process that got its pid since. */
     int bridgePid() {
