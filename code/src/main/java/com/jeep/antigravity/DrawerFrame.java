@@ -14,7 +14,10 @@ import android.widget.FrameLayout;
  * (right) or closes (left), following the finger. Views that can scroll sideways keep their swipes.
  */
 final class DrawerFrame extends FrameLayout {
-    interface Listener { void opened(); }
+    interface Listener {
+        void opened();
+        default void showing() {}
+    }
 
     private final View main, scrim, drawer;
     private final int slop;
@@ -47,6 +50,9 @@ final class DrawerFrame extends FrameLayout {
     void setListener(Listener l) { listener = l; }
 
     boolean isOpen() { return offset > 0.5f; }
+
+    /** Whether the drawer is on screen or opening: its list should be kept up to date. */
+    boolean isVisible() { return open || offset > 0f; }
 
     void open() { animateTo(1); }
 
@@ -83,11 +89,13 @@ final class DrawerFrame extends FrameLayout {
     }
 
     private void apply(float value) {
+        boolean wasVisible = offset > 0f;
         offset = Math.max(0, Math.min(1, value));
         drawer.setTranslationX(-width() * (1 - offset));
         drawer.setVisibility(offset > 0 ? VISIBLE : INVISIBLE);
         scrim.setAlpha(offset);
         scrim.setVisibility(offset > 0 ? VISIBLE : GONE);
+        if (!wasVisible && offset > 0f && !open && listener != null) listener.showing();
     }
 
     private void animateTo(float target) {

@@ -169,9 +169,14 @@ public final class MainActivity extends Activity implements Bridge.Events {
         View main = screen.build();
         frame = new DrawerFrame(this, main, drawer.buildDrawer());
         screen.placeImmersive(); // the drawer too, now that it is there
-        frame.setListener(() -> {
-            box.hideKeyboard();
-            drawer.onOpen();
+        frame.setListener(new DrawerFrame.Listener() {
+            @Override public void opened() {
+                box.hideKeyboard();
+                drawer.onOpen();
+            }
+            @Override public void showing() {
+                drawer.onReveal();
+            }
         });
         setContentView(frame);
     }
@@ -258,7 +263,7 @@ public final class MainActivity extends Activity implements Bridge.Events {
         render();
         // Events come many times a second while a reply streams: the list is built again only when
         // what it shows of the live conversations changed.
-        if (frame.isOpen() && !drawer.drawerState().equals(drawer.drawnState)) drawer.renderSessions();
+        if (frame.isVisible() && !drawer.drawerState().equals(drawer.drawnState)) drawer.renderSessions();
     }
 
     /** A conversation deleted: it and its session are forgotten, and what its claude still says is let go (see chatFor). */

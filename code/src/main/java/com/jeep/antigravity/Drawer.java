@@ -57,6 +57,8 @@ final class Drawer extends Part {
     void reset() {
         shownLink = null;
         drawerPanel = null;
+        drawnState = "";
+        sessionsDirty = true;
     }
 
     View buildDrawer() {
@@ -247,10 +249,14 @@ final class Drawer extends Part {
         return s / (365 * day) + "y";
     }
 
-    private boolean sessionsDirty;
+    private boolean sessionsDirty = true;
+
+    void onReveal() {
+        if (sessionsDirty || !drawerState().equals(drawnState)) renderSessions();
+    }
 
     void onOpen() {
-        if (sessionsDirty) renderSessions();
+        onReveal();
         loadSessions();
     }
 
@@ -274,7 +280,7 @@ final class Drawer extends Part {
 
     void renderSessions() {
         if (sessionsBox == null) return;
-        if (app.frame != null && !app.frame.isOpen()) {
+        if (app.frame != null && !app.frame.isVisible()) {
             sessionsDirty = true;
             return;
         }
@@ -319,7 +325,7 @@ final class Drawer extends Part {
             boolean live = chat != null ? chat.running : s.optBoolean("running");
             LinearLayout item = Ui.column(app);
             item.setPadding(dp(12), dp(10), dp(12), dp(10));
-            boolean active = id.equals(app.current.sessionId);
+            boolean active = app.current != null && id.equals(app.current.sessionId);
             // The open one on a pale round of the accent, as what is chosen in Settings.
             item.setBackground(Ui.press(app, active ? Ui.round(col(R.color.accentSoft), dp(20)) : null, dp(20)));
             LinearLayout line = Ui.row(app);
