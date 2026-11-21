@@ -65,11 +65,13 @@ Protocol (`agy acp`).
   --output-format json`, which answers with no turn, no quota spent and no conversation left behind, and
   takes the app's sign-in): per group of models, the five-hour and weekly limits with what is used and
   when each is full again, and the AI credits left (`/credits`).
-- Signing in: Settings → 账号 → 用 Google 登录 has the bridge run `agy acp --login` under a
+- Signing in: Settings → 账号 → 用 Google 登录 / 添加账号 has the bridge run `agy acp --login` under a
   pseudo-terminal: the link it prints is opened in the browser, and the code the page shows after
-  signing in is pasted in the app and written to it. A Gemini API key is kept in
+  signing in is pasted in the app and written to it. Signed-in Google accounts' OAuth tokens are kept
+  under `~/.agyapp/accounts/` (mode 0600) so tapping another saved account swaps the active token in
+  one tap (`/account/switch`, `/account/remove`) without re-running browser OAuth. A Gemini API key is kept in
   `~/.agyapp/gemini-api-key` (mode 0600), given to agy as `GEMINI_API_KEY`, with agy's
-  `modelProvider` set to `gemini`. agy is started again after a sign-in once no reply runs.
+  `modelProvider` set to `gemini`. agy is started again after a sign-in or account switch once no reply runs.
 - The conversation list is agy's own (`~/.gemini/antigravity-cli/conversation_summaries.db`, read
   only; sub-agents' conversations and empty ones left out); names given in the app are kept in
   `~/.agyapp/titles.json`. A transcript is kept in `~/.agyapp/history/` with when agy last changed

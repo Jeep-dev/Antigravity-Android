@@ -12,6 +12,7 @@ requests need no token.
 Standard library only.
 """
 import argparse
+import hashlib
 import json
 import os
 import queue
@@ -34,7 +35,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlparse
 
-VERSION = 9  # Bridge VERSION in the app: an app update replaces an older running bridge
+VERSION = 10  # Bridge VERSION in the app: an app update replaces an older running bridge
 HOME = os.path.expanduser('~')
 GEMINI_DIR = os.path.join(HOME, '.gemini')
 AGY_DIR = os.environ.get('AGY_DATA_DIR') or os.path.join(GEMINI_DIR, 'antigravity-cli')
@@ -51,6 +52,8 @@ INFO_FILE = os.path.join(STATE_DIR, 'agy-info.json')
 TITLES_FILE = os.path.join(STATE_DIR, 'titles.json')  # names given in the app: session id -> name
 HIDDEN_FILE = os.path.join(STATE_DIR, 'deleted.json')  # sessions deleted in the app
 ACCOUNT_FILE = os.path.join(STATE_DIR, 'account.json')  # who signed in from the app
+ACCOUNTS_DIR = os.path.join(STATE_DIR, 'accounts')  # saved Google tokens for one-tap switching (mode 0700)
+ACCOUNTS_INDEX = os.path.join(ACCOUNTS_DIR, 'index.json')  # saved Google account emails in order (mode 0600)
 KEY_FILE = os.path.join(STATE_DIR, 'gemini-api-key')  # a Gemini API key given in the app (mode 0600)
 HISTORY_DIR = os.path.join(STATE_DIR, 'history')  # each session as the app shows it, kept for the next read
 IMAGES_DIR = os.path.join(STATE_DIR, 'images')  # pictures sent from the app (agy replays no pictures)
@@ -331,7 +334,7 @@ def model_id_for(base, effort):
 
 def models_stamp():
     """What agy's models depend on: agy itself and how it is signed in."""
-    return file_stamp(os.path.realpath(agy_path()), TOKEN_FILE, AGY_SETTINGS, KEY_FILE)
+    return file_stamp(os.path.realpath(agy_path()), TOKEN_FILE, ACCOUNT_FILE, AGY_SETTINGS, KEY_FILE)
 
 
 def keep_models(models_block):
@@ -378,7 +381,7 @@ def find_models():
     try:
         saved = read_json(MODELS_FILE, {})
         if (saved.get('models') and saved.get('stamp') == models_stamp()) or not os.path.exists(agy_path()) \
-                or not signed_in() or time.time() - models_tried < 60:
+                or not signed_in() or (agy.alive() and agy.restart_reason) or time.time() - models_tried < 60:
             return
         agy.ensure()
         os.makedirs(DEFAULT_CWD, exist_ok=True)
@@ -2252,13 +2255,158 @@ def signed_in():
     return os.path.exists(TOKEN_FILE) or api_key_mode()
 
 
+def write_secret_bytes(path, raw):
+    """Writes sensitive bytes (OAuth token, API key) atomically with mode 0600."""
+    parent = os.path.dirname(path)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    part = '%s.%d.%s.tmp' % (path, os.getpid(), uuid.uuid4().hex[:8])
+    fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(raw)
+        os.chmod(part, 0o600)
+        os.replace(part, path)
+    except Exception:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
+
+
+def token_slot(email):
+    """Where a saved Google account's OAuth token is stored (hashed filename: safe for any email string)."""
+    digest = hashlib.sha256(email.strip().lower().encode('utf-8')).hexdigest()[:24]
+    return os.path.join(ACCOUNTS_DIR, digest + '.token')
+
+
+def token_email(path=TOKEN_FILE):
+    """Email embedded in agy's OAuth token file (when present, e.g. real agy including terminal sign-ins)."""
+    data = read_json(path, {})
+    e = data.get('id_token_email')
+    return e.strip() if isinstance(e, str) else ''
+
+
+def active_google_email():
+    """The signed-in Google account's email when TOKEN_FILE is present."""
+    if not os.path.exists(TOKEN_FILE):
+        return ''
+    return token_email(TOKEN_FILE) or str(read_json_cached(ACCOUNT_FILE, {}).get('email') or '').strip()
+
+
+def _saved_accounts_locked():
+    """Ordered list of saved Google account emails whose token files exist on disk."""
+    raw = read_json_cached(ACCOUNTS_INDEX, [])
+    out, seen = [], set()
+    for item in raw:
+        e = item.strip() if isinstance(item, str) else (str(item.get('email') or '').strip() if isinstance(item, dict) else '')
+        if not e:
+            continue
+        low = e.lower()
+        if low in seen:
+            continue
+        slot = token_slot(e)
+        try:
+            if os.path.isfile(slot) and os.path.getsize(slot) > 0:
+                seen.add(low)
+                out.append(e)
+        except OSError:
+            pass
+    return out
+
+
+def _write_saved_accounts_locked(emails):
+    os.makedirs(ACCOUNTS_DIR, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(ACCOUNTS_DIR, 0o700)
+    except OSError:
+        pass
+    write_json(ACCOUNTS_INDEX, emails, mode=0o600)
+
+
+def _save_current_token_locked(email_override=''):
+    """Snapshots the active TOKEN_FILE into the saved-accounts vault (preserving refreshed tokens)."""
+    if not os.path.exists(TOKEN_FILE):
+        return
+    email = (email_override or active_google_email()).strip()
+    if not email:
+        return
+    try:
+        with open(TOKEN_FILE, 'rb') as f:
+            raw = f.read()
+    except OSError:
+        return
+    if not raw:
+        return
+    os.makedirs(ACCOUNTS_DIR, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(ACCOUNTS_DIR, 0o700)
+    except OSError:
+        pass
+    write_secret_bytes(token_slot(email), raw)
+    saved = _saved_accounts_locked()
+    low = email.lower()
+    if not any(x.lower() == low for x in saved):
+        saved.append(email)
+    else:
+        saved = [email if x.lower() == low else x for x in saved]
+    _write_saved_accounts_locked(saved)
+
+
+def _remove_saved_account_locked(email):
+    """Deletes a saved Google account from the vault. Returns (removed, canonical_email)."""
+    low = email.strip().lower()
+    saved = _saved_accounts_locked()
+    kept, removed_email = [], ''
+    for x in saved:
+        if x.lower() == low:
+            removed_email = x
+        else:
+            kept.append(x)
+    slot = token_slot(email)
+    had_file = False
+    try:
+        os.remove(slot)
+        had_file = True
+    except OSError:
+        pass
+    if removed_email or os.path.exists(ACCOUNTS_INDEX):
+        _write_saved_accounts_locked(kept)
+    return bool(removed_email or had_file), removed_email or email.strip()
+
+
+def _clear_api_key_provider_locked():
+    settings = agy_settings()
+    if settings.get('modelProvider') == 'gemini':
+        settings.pop('modelProvider', None)
+        write_json(AGY_SETTINGS, settings)
+
+
+def _invalidate_models_stamp_locked():
+    saved = read_json(MODELS_FILE, {})
+    if saved and 'stamp' in saved:
+        saved.pop('stamp', None)
+        try:
+            write_json(MODELS_FILE, saved)
+        except OSError:
+            pass
+
+
 def account():
-    """Who agy is signed in as: a Google account (its address when the app signed it in), or a Gemini API key."""
+    """Who agy is signed in as, plus the saved Google accounts available for one-tap switching."""
+    with state_lock:
+        email = active_google_email()
+        if email and not os.path.exists(token_slot(email)):
+            try:
+                _save_current_token_locked(email)
+            except OSError:
+                pass
+        saved = _saved_accounts_locked()
     if api_key_mode():
-        return {'signedIn': True, 'method': 'apiKey', 'email': ''}
+        return {'signedIn': True, 'method': 'apiKey', 'email': '', 'accounts': saved}
     if os.path.exists(TOKEN_FILE):
-        return {'signedIn': True, 'method': 'google', 'email': read_json_cached(ACCOUNT_FILE, {}).get('email', '')}
-    return {'signedIn': False, 'method': '', 'email': ''}
+        return {'signedIn': True, 'method': 'google', 'email': email, 'accounts': saved}
+    return {'signedIn': False, 'method': '', 'email': '', 'accounts': saved}
 
 
 def agy_command(name):
@@ -2381,6 +2529,8 @@ class Login:
             self._cancel_locked()
             if not os.path.exists(agy_path()):
                 raise AgyError('agy 还没装好')
+            with state_lock:
+                _save_current_token_locked()
             env = agy_env()
             env['TERM'] = 'dumb'
             env.pop('DISPLAY', None)
@@ -2472,7 +2622,11 @@ class Login:
             return False, 'agy 25 秒没有回应，请重新开始'
         ok, text = att['done']
         if ok:
-            write_json(ACCOUNT_FILE, {'email': text})
+            with state_lock:
+                write_json(ACCOUNT_FILE, {'email': text})
+                _save_current_token_locked(text)
+                _clear_api_key_provider_locked()
+                _invalidate_models_stamp_locked()
             reset_models_tried()
             log('signed in as %s' % text)
             agy.restart_when_idle('signed in')
@@ -2501,8 +2655,74 @@ class Login:
 login = Login()
 
 
+def switch_account(email):
+    """Switches agy to a previously saved Google account without re-running browser OAuth."""
+    wanted = email.strip() if isinstance(email, str) else ''
+    if not wanted:
+        raise AgyError('缺少账号邮箱')
+    already = False
+    with state_lock:
+        saved = _saved_accounts_locked()
+        target = next((x for x in saved if x.lower() == wanted.lower()), None)
+        if target is None:
+            raise LookupError('找不到这个账号，请重新登录')
+        cur = active_google_email()
+        if not api_key_mode() and cur and cur.lower() == target.lower():
+            already = True
+        else:
+            if cur and cur.lower() != target.lower():
+                _save_current_token_locked(cur)
+            try:
+                with open(token_slot(target), 'rb') as f:
+                    raw = f.read()
+            except OSError:
+                raise LookupError('找不到这个账号，请重新登录')
+            if not raw:
+                raise AgyError('账号登录信息已失效，请重新登录')
+            write_secret_bytes(TOKEN_FILE, raw)
+            write_json(ACCOUNT_FILE, {'email': target})
+            _clear_api_key_provider_locked()
+            _invalidate_models_stamp_locked()
+    if already:
+        return account()
+    reset_models_tried()
+    log('switched account to %s' % target)
+    agy.restart_when_idle('account switched')
+    voice_dictator.stop('account switched')
+    threading.Thread(target=find_models, daemon=True).start()
+    hub.emit('', 'config')
+    return account()
+
+
+def remove_account(email):
+    """Removes a saved Google account from this device; if active, signs out of agy too."""
+    wanted = email.strip() if isinstance(email, str) else ''
+    if not wanted:
+        raise AgyError('缺少账号邮箱')
+    with state_lock:
+        cur = active_google_email()
+        is_current_token = bool(cur and cur.lower() == wanted.lower())
+        is_active_google = is_current_token and not api_key_mode()
+        removed, canonical = _remove_saved_account_locked(wanted)
+        if not removed and not is_current_token:
+            raise LookupError('找不到这个账号')
+        if is_current_token and not is_active_google:
+            for path in (TOKEN_FILE, ACCOUNT_FILE):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+    if is_active_google:
+        logout()
+    else:
+        log('removed saved account %s' % canonical)
+        hub.emit('', 'config')
+    return account()
+
+
 def logout():
-    """Signs out of Google: agy forgets its token (session/… then asks to sign in again)."""
+    """Signs out of the active Google account: agy forgets its token and it is removed from saved accounts."""
+    cur = active_google_email()
     try:
         agy.ensure(timeout=30)
         agy.request('logout', {}, timeout=20)
@@ -2516,6 +2736,11 @@ def logout():
         os.remove(ACCOUNT_FILE)
     except OSError:
         pass
+    with state_lock:
+        if cur:
+            _remove_saved_account_locked(cur)
+        _invalidate_models_stamp_locked()
+    reset_models_tried()
     agy.restart_when_idle('signed out')
     voice_dictator.stop('signed out')
     hub.emit('', 'config')
@@ -3407,6 +3632,22 @@ class Handler(BaseHTTPRequestHandler):
         logout()
         self.reply(200, {'ok': True, 'account': account()})
 
+    def post_account_switch(self, data):
+        try:
+            self.reply(200, {'ok': True, 'account': switch_account(data.get('email'))})
+        except LookupError as e:
+            self.reply(404, {'error': str(e)})
+        except AgyError as e:
+            self.reply(400, {'error': str(e)})
+
+    def post_account_remove(self, data):
+        try:
+            self.reply(200, {'ok': True, 'account': remove_account(data.get('email'))})
+        except LookupError as e:
+            self.reply(404, {'error': str(e)})
+        except AgyError as e:
+            self.reply(400, {'error': str(e)})
+
     def post_cancel(self, data):
         chat = chat_for(data['chat'], data.get('sessionId'), create=False)
         self.reply(200, {'cancelled': True if chat is None else chat.cancel(str(data.get('uuid') or ''))})
@@ -3554,7 +3795,8 @@ class Handler(BaseHTTPRequestHandler):
            '/memory': get_memory, '/dirs': get_dirs, '/account': get_account, '/usage': get_usage}
     POST = {'/context': post_context, '/send': post_send, '/open': post_open, '/launch': post_launch,
             '/memory': post_memory, '/auth': post_auth, '/login': post_login, '/login-code': post_login_code,
-            '/logout': post_logout, '/cancel': post_cancel, '/stop': post_stop, '/delete': post_delete, '/delete-all': post_delete_all,
+            '/logout': post_logout, '/account/switch': post_account_switch, '/account/remove': post_account_remove,
+            '/cancel': post_cancel, '/stop': post_stop, '/delete': post_delete, '/delete-all': post_delete_all,
             '/rewind': post_rewind, '/delete-message': post_delete_message, '/title': post_title,
             '/permission': post_permission, '/mkdir': post_mkdir,
             '/voice/warm': post_voice_warm, '/voice/cancel': post_voice_cancel}

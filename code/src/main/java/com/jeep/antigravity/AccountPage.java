@@ -3,19 +3,25 @@ package com.jeep.antigravity;
 import android.app.Dialog;
 import android.view.WindowManager;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import java.util.ArrayList;
+import java.util.List;
+
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * Settings → 账号: how agy signs in. With a Google account, as `agy acp --login` does it in a
- * terminal (the bridge runs it): a link opened in the browser, then the code the page shows pasted
- * here. Or with a Gemini API key (kept by the bridge, given to agy as GEMINI_API_KEY). Then the
- * models agy offers.
+ * Settings → 账号: how agy signs in. With one or more Google accounts (kept by the bridge so
+ * switching between them is a single tap, and adding one runs `agy acp --login`: a link opened in
+ * the browser, then the code the page shows pasted here). Or with a Gemini API key (kept by the
+ * bridge, given to agy as GEMINI_API_KEY). Then the models agy offers.
  */
 final class AccountPage extends Part {
     private boolean loggingIn;
+    private boolean switching;
 
     AccountPage(MainActivity app) { super(app); }
 
@@ -28,16 +34,53 @@ final class AccountPage extends Part {
         }
     }
 
+    private static List<String> savedAccounts(JSONObject who, boolean google, String email) {
+        List<String> list = new ArrayList<>();
+        JSONArray arr = who.optJSONArray("accounts");
+        for (int i = 0; arr != null && i < arr.length(); i++) {
+            String e = arr.optString(i).trim();
+            if (!e.isEmpty() && !containsIgnoreCase(list, e)) list.add(e);
+        }
+        if (google && !email.isEmpty() && !containsIgnoreCase(list, email)) list.add(0, email);
+        return list;
+    }
+
+    private static boolean containsIgnoreCase(List<String> list, String target) {
+        for (String item : list) if (item.equalsIgnoreCase(target)) return true;
+        return false;
+    }
+
     void fill(LinearLayout box) {
         JSONObject who = account();
         boolean google = "google".equals(who.optString("method"));
         boolean key = "apiKey".equals(who.optString("method"));
+        String email = who.optString("email").trim();
+        List<String> accounts = savedAccounts(who, google, email);
+
         app.settings.section(box, "Google 账号");
         LinearLayout g = app.settings.card(box);
-        if (google) {
-            String email = who.optString("email");
-            sheets.option(g, R.drawable.ic_check, email.isEmpty() ? "已登录" : email, email.isEmpty() ? null : "已登录", false, null);
-            sheets.option(g, R.drawable.ic_refresh, "换一个账号", null, false, this::login);
+        if (!accounts.isEmpty()) {
+            for (String acc : accounts) {
+                boolean active = google && !email.isEmpty() && email.equalsIgnoreCase(acc);
+                if (active) {
+                    sheets.option(g, R.drawable.ic_check, acc, "当前使用", false, null);
+                } else {
+                    sheets.option(g, R.drawable.ic_globe, acc, "点一下切换", false, () -> switchAccount(acc));
+                    LinearLayout row = (LinearLayout) g.getChildAt(g.getChildCount() - 1);
+                    ImageView rm = Ui.iconButton(app, R.drawable.ic_trash, 40, 18, R.color.text3);
+                    rm.setBackground(Ui.press(app, null, dp(20)));
+                    rm.setContentDescription("移除 " + acc);
+                    rm.setOnClickListener(v -> removeAccountAsk(acc));
+                    row.addView(rm, new LinearLayout.LayoutParams(dp(40), dp(40)));
+                    Ui.margins(rm, app, 4, 0, -6, 0);
+                }
+            }
+            sheets.option(g, R.drawable.ic_plus, "添加账号",
+                    key ? "现在用的是 API Key，点上方账号可切回" : "保存多个账号，点一下即可切换", false, this::login);
+            if (google) sheets.option(g, R.drawable.ic_x, "退出登录", null, true, this::logoutAsk);
+        } else if (google) {
+            sheets.option(g, R.drawable.ic_check, "已登录", null, false, null);
+            sheets.option(g, R.drawable.ic_plus, "添加账号", "保存多个账号，点一下即可切换", false, this::login);
             sheets.option(g, R.drawable.ic_x, "退出登录", null, true, this::logoutAsk);
         } else {
             sheets.option(g, R.drawable.ic_globe, "用 Google 登录", key ? "现在用的是 API Key" : "个人账号可以免费用", false, this::login);
@@ -56,7 +99,47 @@ final class AccountPage extends Part {
         });
     }
 
-    // ---- Google: the link, then the code ----
+    // ---- Google: switch, remove, and add (the link, then the code) ----
+
+    private void switchAccount(String email) {
+        if (!app.link.linked) { toast("后台还没启动好"); return; }
+        if (switching) return;
+        switching = true;
+        toast("正在切换账号…");
+        bridge.post("/account/switch", obj("email", email), (status, data) -> {
+            switching = false;
+            if (app.isFinishing() || app.isDestroyed()) return;
+            if (status == 200) {
+                if (data.optJSONObject("account") != null) {
+                    prefs.edit().putString("account", data.optJSONObject("account").toString()).apply();
+                }
+                toast("已切换到：" + email);
+                refreshConfig(4);
+            } else {
+                toast("切换失败：" + data.optString("error", "HTTP " + status));
+            }
+        });
+    }
+
+    private void removeAccountAsk(String email) {
+        if (!app.link.linked) { toast("后台还没启动好"); return; }
+        Dialog ask = sheets.sheet("移除账号？", "会删除 " + email + " 在本机保存的登录状态；对话记录不会删。");
+        TextView cancel = sheets.button("取消", false, v -> ask.dismiss());
+        TextView ok = sheets.button("移除", true, v -> {
+            ask.dismiss();
+            bridge.post("/account/remove", obj("email", email), (status, data) -> {
+                if (app.isFinishing() || app.isDestroyed()) return;
+                if (status != 200) { toast("移除失败：" + data.optString("error", "HTTP " + status)); return; }
+                if (data.optJSONObject("account") != null) {
+                    prefs.edit().putString("account", data.optJSONObject("account").toString()).apply();
+                }
+                toast("已移除：" + email);
+                refreshConfig(1);
+            });
+        });
+        sheets.actions(ask, cancel, ok);
+        ask.show();
+    }
 
     private void login() {
         if (!app.link.linked) { toast("后台还没启动好"); return; }
@@ -112,12 +195,16 @@ final class AccountPage extends Part {
     }
 
     private void logoutAsk() {
-        Dialog ask = sheets.sheet("退出 Google 账号？", "退出后要重新登录才能发消息；对话记录不会删。");
+        Dialog ask = sheets.sheet("退出当前 Google 账号？", "退出后当前账号需要重新登录；其他已保存账号不受影响，对话记录不会删。");
         TextView cancel = sheets.button("取消", false, v -> ask.dismiss());
         TextView ok = sheets.button("退出", true, v -> {
             ask.dismiss();
             bridge.post("/logout", new JSONObject(), (status, data) -> {
+                if (app.isFinishing() || app.isDestroyed()) return;
                 if (status != 200) { toast("没能退出：" + data.optString("error", "HTTP " + status)); return; }
+                if (data.optJSONObject("account") != null) {
+                    prefs.edit().putString("account", data.optJSONObject("account").toString()).apply();
+                }
                 toast("已退出");
                 refreshConfig(1);
             });

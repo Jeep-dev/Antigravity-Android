@@ -65,8 +65,12 @@ if a[:2] == ['acp', '--login']:
     sys.stdout.flush()
     code = sys.stdin.readline().strip()
     if code == 'good-code':
-        open(token, 'w').write('{}')
+        open(token, 'w').write('{"id_token_email":"someone@example.com","token":{"access_token":"t1"}}')
         print('Logged in as someone@example.com.')
+        sys.exit(0)
+    if code == 'good-code-2':
+        open(token, 'w').write('{"id_token_email":"second@example.com","token":{"access_token":"t2"}}')
+        print('Logged in as second@example.com.')
         sys.exit(0)
     print('Error: invalid authorization code')
     sys.exit(1)
@@ -506,6 +510,17 @@ def run_tests(bridge_path, record, tmp):
     call('GET', '/sessions')
     note('files of the deleted conversation', sorted(n for n in os.listdir(os.path.join(home, '.gemini', 'antigravity-cli', 'conversations'))
                                                      if sid2 in n))
+
+    # ---- multi-account: add second account, switch, remove ----
+    call('POST', '/login', {})
+    call('POST', '/login-code', {'code': 'good-code-2'})
+    call('GET', '/account')
+    call('POST', '/account/switch', {'email': 'someone@example.com'})
+    call('POST', '/account/switch', {'email': 'missing@example.com'})
+    call('POST', '/account/switch', {'email': ''})
+    call('POST', '/account/remove', {'email': 'second@example.com'})
+    call('POST', '/account/remove', {'email': 'second@example.com'})
+    call('GET', '/account')
 
     # ---- a Gemini API key; signing out ----
     call('POST', '/auth', {'provider': 'gemini', 'key': 'AIza-1'})

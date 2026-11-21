@@ -6,7 +6,7 @@
     "defaultCwd": "<T>/home/work",
     "home": "<T>/home",
     "ok": true,
-    "version": 9
+    "version": 10
    },
    "req": "GET /health ",
    "status": 200
@@ -14,6 +14,7 @@
   {
    "body": {
     "account": {
+     "accounts": [],
      "email": "",
      "method": "",
      "signedIn": false
@@ -40,6 +41,7 @@
   },
   {
    "body": {
+    "accounts": [],
     "email": "",
     "method": "",
     "signedIn": false
@@ -204,6 +206,9 @@
   },
   {
    "body": {
+    "accounts": [
+     "someone@example.com"
+    ],
     "email": "someone@example.com",
     "method": "google",
     "signedIn": true
@@ -256,6 +261,9 @@
   {
    "body": {
     "account": {
+     "accounts": [
+      "someone@example.com"
+     ],
      "email": "someone@example.com",
      "method": "google",
      "signedIn": true
@@ -1307,7 +1315,102 @@
   },
   {
    "body": {
+    "url": "https://accounts.google.com/o/oauth2/auth?client_id=x&state=y"
+   },
+   "req": "POST /login {}",
+   "status": 200
+  },
+  {
+   "body": {
+    "email": "second@example.com",
+    "ok": true
+   },
+   "req": "POST /login-code {\"code\": \"good-code-2\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "accounts": [
+     "someone@example.com",
+     "second@example.com"
+    ],
+    "email": "second@example.com",
+    "method": "google",
+    "signedIn": true
+   },
+   "req": "GET /account ",
+   "status": 200
+  },
+  {
+   "body": {
     "account": {
+     "accounts": [
+      "someone@example.com",
+      "second@example.com"
+     ],
+     "email": "someone@example.com",
+     "method": "google",
+     "signedIn": true
+    },
+    "ok": true
+   },
+   "req": "POST /account/switch {\"email\": \"someone@example.com\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "error": "找不到这个账号，请重新登录"
+   },
+   "req": "POST /account/switch {\"email\": \"missing@example.com\"}",
+   "status": 404
+  },
+  {
+   "body": {
+    "error": "缺少账号邮箱"
+   },
+   "req": "POST /account/switch {\"email\": \"\"}",
+   "status": 400
+  },
+  {
+   "body": {
+    "account": {
+     "accounts": [
+      "someone@example.com"
+     ],
+     "email": "someone@example.com",
+     "method": "google",
+     "signedIn": true
+    },
+    "ok": true
+   },
+   "req": "POST /account/remove {\"email\": \"second@example.com\"}",
+   "status": 200
+  },
+  {
+   "body": {
+    "error": "找不到这个账号"
+   },
+   "req": "POST /account/remove {\"email\": \"second@example.com\"}",
+   "status": 404
+  },
+  {
+   "body": {
+    "accounts": [
+     "someone@example.com"
+    ],
+    "email": "someone@example.com",
+    "method": "google",
+    "signedIn": true
+   },
+   "req": "GET /account ",
+   "status": 200
+  },
+  {
+   "body": {
+    "account": {
+     "accounts": [
+      "someone@example.com"
+     ],
      "email": "",
      "method": "apiKey",
      "signedIn": true
@@ -1337,6 +1440,9 @@
   {
    "body": {
     "account": {
+     "accounts": [
+      "someone@example.com"
+     ],
      "email": "someone@example.com",
      "method": "google",
      "signedIn": true
@@ -1354,6 +1460,7 @@
   {
    "body": {
     "account": {
+     "accounts": [],
      "email": "",
      "method": "",
      "signedIn": false
@@ -1365,6 +1472,7 @@
   },
   {
    "body": {
+    "accounts": [],
     "email": "",
     "method": "",
     "signedIn": false
