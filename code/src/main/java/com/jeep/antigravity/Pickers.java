@@ -52,10 +52,7 @@ final class Pickers extends Part {
             if (name == null) name = shortModel(value);
         }
         String level = agent.effortsOf(agent.model).contains(agent.effortInUse()) ? effortName(agent.effortInUse()) : "";
-        String label = level.isEmpty() ? name : name + " " + level;
-        // A mode that changes what happens without asking is shown with the model.
-        if ("plan".equals(agent.mode) || "bypassPermissions".equals(agent.mode)) label += " · " + modeName(agent.mode);
-        return label;
+        return level.isEmpty() ? name : name + " " + level;
     }
 
     /** The permission modes: id, name, what it does. */
