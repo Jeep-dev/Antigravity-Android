@@ -669,6 +669,7 @@ final class Userland {
     private void prepareFiles() throws IOException {
         mkdirs(tmp);
         writeRish();
+        writeUsbTools();
         Set<String> dns = new LinkedHashSet<>();
         try {
             ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
@@ -699,6 +700,36 @@ final class Userland {
 
     void writeBridge() throws IOException {
         replace(new File(rootfs, "opt/agyapp/bridge.py"), read(context.getAssets().open("bridge.py")));
+    }
+
+    /**
+     * Installs agy-usb and agy-fastboot in the userland, pointing them at this app's abstract
+     * UsbBridge socket so release and preview builds do not collide.
+     */
+    private void writeUsbTools() throws IOException {
+        File dir = new File(rootfs, "opt/agyapp");
+        mkdirs(dir);
+        String sock = UsbBridge.socketName(context);
+        for (String[] tool : new String[][]{{"agy-usb.py", "agy-usb"}, {"agy-fastboot.py", "agy-fastboot"}}) {
+            File script = new File(dir, tool[0]);
+            replace(script, read(context.getAssets().open(tool[0])));
+            chmod(script, 0755);
+            File binFile = new File(rootfs, "usr/local/bin/" + tool[1]);
+            File part = new File(binFile.getPath() + ".part");
+            write(part, "#!/bin/sh\n"
+                    + "export AGY_USB_SOCKET=" + sock + "\n"
+                    + "exec python3 /opt/agyapp/" + tool[0] + " \"$@\"\n");
+            try {
+                Os.chmod(part.getPath(), 0755);
+            } catch (ErrnoException e) {
+                part.delete();
+                throw new IOException(e);
+            }
+            if (!part.renameTo(binFile)) {
+                part.delete();
+                throw new IOException("could not move " + part + " in");
+            }
+        }
     }
 
     // ---- files ----

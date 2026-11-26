@@ -37,6 +37,7 @@ public final class BridgeService extends Service {
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private Userland userland;
+    private UsbBridge usbBridge;
     private PowerManager.WakeLock wake;
     private final Object procLock = new Object();
     /** The bridge's process: set and cleared under procLock, read by the watcher and onDestroy. */
@@ -80,6 +81,8 @@ public final class BridgeService extends Service {
         wake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "antigravity:bridge");
         wake.setReferenceCounted(false);
         wake.acquire();
+        usbBridge = new UsbBridge(this);
+        usbBridge.start();
         registerReceiver(zone, new IntentFilter(Intent.ACTION_TIMEZONE_CHANGED));
     }
 
@@ -93,6 +96,7 @@ public final class BridgeService extends Service {
 
     @Override public void onDestroy() {
         unregisterReceiver(zone);
+        if (usbBridge != null) usbBridge.stop();
         Process p;
         synchronized (procLock) {
             destroyed = true;
