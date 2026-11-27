@@ -9,16 +9,9 @@ android {
         // 28: agy and the userland's programs run from this app's files, which Android
         // allows only to apps targeting 28 or lower (as Termux does).
         targetSdk 28
-        versionCode 6
-        versionName '0.1.5'
+        versionCode 7
+        versionName '0.1.5-root'
         manifestPlaceholders = [appLabel: '@string/app_name']
-        // A build of a branch (CI sets AGY_PREVIEW): installed beside the app as one of its own,
-        // its own files and bridge, so a change can be tried while the app keeps working.
-        if (System.getenv('AGY_PREVIEW')) {
-            applicationIdSuffix '.preview'
-            versionNameSuffix '-preview'
-            manifestPlaceholders = [appLabel: 'Antigravity 测试版']
-        }
     }
     signingConfigs {
         release {
