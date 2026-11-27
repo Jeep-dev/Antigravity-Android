@@ -35,8 +35,19 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlparse
 
-VERSION = 12  # Bridge VERSION in the app: an app update replaces an older running bridge
+VERSION = 13  # Bridge VERSION in the app: an app update replaces an older running bridge
 HOME = os.path.expanduser('~')
+_APP_UID = int(os.environ['AGY_APP_UID']) if os.environ.get('AGY_APP_UID', '').isdigit() else None
+
+
+def _fix_app_owner(path):
+    """When running as real root in chroot, hand state files/sockets back to the app UID so the
+    app process can connect to bridge.sock and read/write its config while staying isolated (0600)."""
+    if _APP_UID is not None and _APP_UID > 0 and os.geteuid() == 0:
+        try:
+            os.chown(path, _APP_UID, _APP_UID)
+        except OSError:
+            pass
 GEMINI_DIR = os.path.join(HOME, '.gemini')
 AGY_DIR = os.environ.get('AGY_DATA_DIR') or os.path.join(GEMINI_DIR, 'antigravity-cli')
 STATE_DIR = os.path.join(HOME, '.agyapp')
@@ -123,6 +134,7 @@ def write_json(path, data, mode=None, indent=2):
                 json.dump(data, f, ensure_ascii=False, indent=indent)
         if mode is not None:
             os.chmod(part, mode)
+        _fix_app_owner(part)
         os.replace(part, path)
         with _json_cache_lock:
             _json_cache.pop(path, None)
@@ -4342,6 +4354,7 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             super().server_bind()
         finally:
             os.umask(old)
+        _fix_app_owner(self.server_address)
 
 
 def running_bridge():
@@ -4395,6 +4408,7 @@ def replace_running_bridge():
     part = '%s.%d.tmp' % (PID_FILE, os.getpid())
     with open(part, 'w') as f:
         f.write(str(os.getpid()))
+    _fix_app_owner(part)
     os.replace(part, PID_FILE)
 
 
@@ -4420,6 +4434,7 @@ def log(text):
                 except OSError:
                     _log_bytes = 0
                 _log_fp = open(LOG_FILE, 'a', encoding='utf-8', errors='replace')
+                _fix_app_owner(LOG_FILE)
                 _log_path = LOG_FILE
             if _log_bytes > 200_000:
                 _log_fp.close()

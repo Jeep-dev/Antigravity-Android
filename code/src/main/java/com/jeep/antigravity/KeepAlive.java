@@ -1,26 +1,21 @@
 package com.jeep.antigravity;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.util.concurrent.TimeUnit;
-
 /**
- * Keeps Android from stopping agy in the background, set through Shizuku's rish (shell
- * privileges) in the userland: the app on the battery whitelist, allowed to run in the background,
- * and Android 12+'s limit on child processes off. Checked, and set when it is not, by the app itself.
+ * Keeps Android from stopping agy in the background, set directly through real root (`su`):
+ * the app on the battery whitelist, allowed to run in the background, and Android 12+'s limit on
+ * child processes off. Checked, and set when it is not, by the app itself.
  */
 final class KeepAlive {
-    /** All set; set now (it was not); not set though tried; rish did not run (no Shizuku, or not allowed). */
+    /** All set; set now (it was not); not set though tried; root did not run (no root, or not allowed). */
     static final int ON = 0, SET = 1, OFF = 2, NO_SHIZUKU = 3;
 
     private KeepAlive() {}
 
-    /** Checks it, and sets what is not set. Off the main thread: rish takes a second or more. */
+    /** Checks it, and sets what is not set. Off the main thread. */
     static int ensure(Userland userland, String pkg) {
         int state = check(userland, pkg);
         if (state != OFF) return state;
-        rish(userland, "dumpsys deviceidle whitelist +" + pkg
+        su(userland, "dumpsys deviceidle whitelist +" + pkg
                 + "; cmd appops set " + pkg + " RUN_ANY_IN_BACKGROUND allow"
                 + "; settings put global settings_enable_monitor_phantom_procs false"
                 + "; device_config put activity_manager max_phantom_processes 2147483647");
@@ -29,7 +24,7 @@ final class KeepAlive {
     }
 
     private static int check(Userland userland, String pkg) {
-        String out = rish(userland, "dumpsys deviceidle whitelist | grep -q ," + pkg + ", && echo idle=1"
+        String out = su(userland, "dumpsys deviceidle whitelist | grep -q ," + pkg + ", && echo idle=1"
                 + "; cmd appops get " + pkg + " RUN_ANY_IN_BACKGROUND"
                 + "; echo phantom=$(settings get global settings_enable_monitor_phantom_procs)"
                 + "; echo max=$(device_config get activity_manager max_phantom_processes)"
@@ -54,31 +49,8 @@ final class KeepAlive {
         }
     }
 
-    /** What rish printed running the script, or null when it did not end within 20 s. */
-    private static String rish(Userland userland, String script) {
-        File out = null;
-        Process p = null;
-        try {
-            ProcessBuilder pb = new ProcessBuilder(userland.command("/usr/local/bin/rish", "-c", script));
-            userland.env(pb);
-            pb.directory(userland.base);
-            pb.redirectErrorStream(true);
-            out = File.createTempFile("rish", null, userland.tmp);
-            pb.redirectOutput(out);
-            p = pb.start();
-            if (!p.waitFor(20, TimeUnit.SECONDS)) {
-                p.destroyForcibly();
-                return null;
-            }
-            return Userland.read(new FileInputStream(out));
-        } catch (IOException e) {
-            return null;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return null;
-        } finally {
-            if (p != null && p.isAlive()) p.destroyForcibly();
-            if (out != null) out.delete();
-        }
+    /** What su printed running the script, or null when it did not end within 20 s. */
+    private static String su(Userland userland, String script) {
+        return Userland.suCapture(script, 20);
     }
 }

@@ -31,24 +31,26 @@ import java.util.function.Consumer;
 
 /**
  * The Linux userland agy runs in, inside this app: Alpine (with Python, git and the tools agy's
- * commands use) run under Termux's proot; agy itself is downloaded into it by agy-update. Built by code/runtime/*.sh in CI; proot comes in the APK, the
- * userland (rootfs.tar.xz) is downloaded from where CI published it (assets/runtime/rootfs.url),
- * once per userland, unless the APK carries it (a build of its own).
+ * commands use) run directly in the phone's Linux kernel via root chroot (no proot / ptrace);
+ * agy itself is downloaded into it by agy-update. Built by code/runtime/*.sh in CI; the userland
+ * (rootfs.tar.xz) is downloaded from where CI published it (assets/runtime/rootfs.url), once per
+ * userland, unless the APK carries it (a build of its own).
  */
 final class Userland {
     static final String HOME = "/root";
-    private static final String[] PROOT_FILES = {"proot", "loader", "libtalloc.so.2", "libandroid-shmem.so"};
+    private static final String CHROOT_EXEC = "chroot-exec.sh";
+    private static final String HOST_PATH = "/system/bin:/system/xbin:/vendor/bin:/sbin:/debug_ramdisk:/data/adb/ksu/bin:/data/adb/ap/bin";
 
-    final File base, rootfs, bin, tmp, log;
+    final File base, rootfs, tmp, log, chrootExec;
     private final Context context;
 
     Userland(Context context) {
         this.context = context.getApplicationContext();
         base = this.context.getFilesDir();
         rootfs = new File(base, "rootfs");
-        bin = new File(base, "proot");
         tmp = new File(base, "tmp");
         log = new File(base, "runtime.log");
+        chrootExec = new File(base, CHROOT_EXEC);
     }
 
     /** The id of the userland in this APK; null when the APK carries none (a local build). */
@@ -147,16 +149,7 @@ final class Userland {
         }
         File download = new File(base, "rootfs-" + id + ".tar.xz");
         if (!inApk) fetch(read(assets.open("runtime/rootfs.url")).trim(), read(assets.open("runtime/rootfs.sha256")).trim(), download, status);
-        mkdirs(bin);
         mkdirs(tmp);
-        for (String name : PROOT_FILES) {
-            File f = new File(bin, name);
-            f.delete();
-            try (InputStream in = assets.open("runtime/" + name); OutputStream out = new FileOutputStream(f)) {
-                copy(in, out);
-            }
-            chmod(f, 0700);
-        }
         marker().delete();
         long total = inApk ? assetLength(assets, "runtime/rootfs.tar.xz") : download.length();
         long[] done = {0};
@@ -498,59 +491,73 @@ final class Userland {
 
     // ---- running ----
 
-    /** Phone storage, shared into the userland as /sdcard once the app may read it. */
-    private static File storage() {
-        File s = Environment.getExternalStorageDirectory();
-        return s != null && s.canRead() ? s : null;
+    /** Quotes a single argument for POSIX sh. */
+    static String shellQuote(String s) {
+        return "'" + s.replace("'", "'\\''") + "'";
+    }
+
+    /** Runs a short command as real root via su; returns stdout or null on error/timeout. */
+    static String suCapture(String script, int timeoutSec) {
+        Process p = null;
+        try {
+            ProcessBuilder pb = new ProcessBuilder("/system/bin/sh", "-c", "exec su -c " + shellQuote(script));
+            pb.environment().put("PATH", HOST_PATH);
+            pb.redirectErrorStream(true);
+            p = pb.start();
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            Process proc = p;
+            Thread reader = new Thread(() -> {
+                try (InputStream in = proc.getInputStream()) {
+                    copy(in, out);
+                } catch (IOException ignored) {
+                    // process ended
+                }
+            }, "su-capture");
+            reader.setDaemon(true);
+            reader.start();
+            if (!p.waitFor(timeoutSec, java.util.concurrent.TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return null;
+            }
+            reader.join(1000);
+            return p.exitValue() == 0 ? out.toString("UTF-8") : null;
+        } catch (IOException e) {
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } finally {
+            if (p != null && p.isAlive()) p.destroyForcibly();
+        }
+    }
+
+    /** True when su grants real uid=0 root to this app. */
+    static boolean hasRoot() {
+        String out = suCapture("id -u", 5);
+        return out != null && "0".equals(out.trim());
     }
 
     /**
-     * The proot command running args (inside the userland, as root in /root); the environment
-     * for it is in {@link #env(ProcessBuilder)}.
+     * The native root chroot command running args (inside the userland, as real uid=0 in /root,
+     * with no proot/ptrace); the host environment for it is in {@link #env(ProcessBuilder)}.
      */
     List<String> command(String... args) throws IOException {
         prepare();
-        List<String> c = new ArrayList<>();
-        c.add(new File(bin, "proot").getPath());
-        c.add("--kill-on-exit");
-        c.add("--link2symlink");
-        c.add("-0");
-        c.add("-r");
-        c.add(rootfs.getPath());
-        for (String b : new String[]{"/dev", "/proc", "/sys", "/proc/self/fd:/dev/fd"}) { c.add("-b"); c.add(b); }
-        c.add("-b");
-        c.add(new File(rootfs, "tmp").getPath() + ":/dev/shm");
-        File procs = new File(base, "proc");
-        for (String name : new String[]{"stat", "loadavg", "uptime", "version", "vmstat"}) {
-            if (readable(new File("/proc/" + name))) continue;
-            c.add("-b");
-            c.add(new File(procs, name).getPath() + ":/proc/" + name);
+        if (!hasRoot()) {
+            throw new IOException("未获得 Root 权限：请在 KernelSU / SukiSU / Magisk 中授予本应用 Root 权限");
         }
-        // Android's own system, for its programs (app_process for rish): at the same paths.
-        for (String d : ANDROID_DIRS) {
-            if (!new File(d).exists()) continue;
-            c.add("-b");
-            c.add(d);
-        }
-        File sd = storage();
-        if (sd != null) {
-            c.add("-b");
-            c.add(sd.getPath() + ":/sdcard");
-            c.add("-b");
-            c.add("/storage");
-        }
-        c.add("-w");
-        c.add(HOME);
-        c.add("/usr/bin/env");
-        c.add("-i");
-        c.add("HOME=" + HOME);
-        c.add("USER=root");
-        c.add("PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin");
-        c.add("SHELL=/bin/bash");
-        c.add("LANG=C.UTF-8");
-        c.add("TERM=xterm-256color");
-        c.add("TMPDIR=/tmp");
-        for (String a : args) c.add(a);
+        StringBuilder inner = new StringBuilder();
+        inner.append("/system/bin/sh ")
+                .append(shellQuote(chrootExec.getPath()))
+                .append(' ')
+                .append(shellQuote(rootfs.getPath()))
+                .append(' ')
+                .append(android.os.Process.myUid());
+        for (String a : args) inner.append(' ').append(shellQuote(a));
+        List<String> c = new ArrayList<>(3);
+        c.add("/system/bin/sh");
+        c.add("-c");
+        c.add("exec su -c " + shellQuote(inner.toString()));
         return c;
     }
 
@@ -559,54 +566,114 @@ final class Userland {
         for (String kv : env()) pb.environment().put(kv.substring(0, kv.indexOf('=')), kv.substring(kv.indexOf('=') + 1));
     }
 
-    /** proot's own environment, as KEY=value. */
+    /** Host environment for launching su + chroot, as KEY=value. */
     String[] env() {
-        return new String[]{"PROOT_TMP_DIR=" + tmp.getPath(), "PROOT_LOADER=" + new File(bin, "loader").getPath(),
-                "LD_LIBRARY_PATH=" + bin.getPath(), "PATH=/system/bin", "HOME=" + base.getPath()};
+        return new String[]{"PATH=" + HOST_PATH, "HOME=" + base.getPath()};
     }
-
-    private static boolean readable(File f) {
-        try (InputStream in = new FileInputStream(f)) {
-            in.read();
-            return true;
-        } catch (IOException | SecurityException e) {
-            return false;
-        }
-    }
-
-    private static final String[] ANDROID_DIRS = {"/system", "/apex", "/vendor", "/product", "/system_ext", "/odm", "/data"};
-    /** Shizuku's app: its APK carries the dex rish runs. */
-    private static final String SHIZUKU = "moe.shizuku.privileged.api";
 
     /**
-     * rish in the userland, as in Termux: Android's app_process running Shizuku's rish dex, taken
-     * from the installed Shizuku (again only when Shizuku changes), with Android's environment.
+     * Writes the host helper script that enters an isolated mount namespace (unshare -m),
+     * bind-mounts Linux virtual filesystems and Android host directories with real root
+     * permissions, and execs into the Alpine rootfs via kernel chroot.
+     */
+    private void writeChrootExec() throws IOException {
+        String script = "#!/system/bin/sh\n"
+                + "set -eu\n"
+                + "ROOTFS=\"$1\"\n"
+                + "APP_UID=\"$2\"\n"
+                + "shift 2\n"
+                + "\n"
+                + "if [ \"${1:-}\" != \"--in-ns\" ]; then\n"
+                + "  if command -v unshare >/dev/null 2>&1 && unshare -m true 2>/dev/null; then\n"
+                + "    exec unshare -m /system/bin/sh \"$0\" \"$ROOTFS\" \"$APP_UID\" --in-ns \"$@\"\n"
+                + "  elif command -v toybox >/dev/null 2>&1 && toybox unshare -m true 2>/dev/null; then\n"
+                + "    exec toybox unshare -m /system/bin/sh \"$0\" \"$ROOTFS\" \"$APP_UID\" --in-ns \"$@\"\n"
+                + "  fi\n"
+                + "else\n"
+                + "  shift\n"
+                + "fi\n"
+                + "\n"
+                + "mount --make-rslave / 2>/dev/null || mount -o rslave / 2>/dev/null || mount --make-rprivate / 2>/dev/null || true\n"
+                + "\n"
+                + "bind_dir() {\n"
+                + "  src=\"$1\"\n"
+                + "  dst=\"$ROOTFS$2\"\n"
+                + "  [ -d \"$src\" ] || return 0\n"
+                + "  mkdir -p \"$dst\" 2>/dev/null || true\n"
+                + "  mount --bind \"$src\" \"$dst\" 2>/dev/null || mount -o bind \"$src\" \"$dst\" 2>/dev/null || true\n"
+                + "}\n"
+                + "\n"
+                + "rbind_dir() {\n"
+                + "  src=\"$1\"\n"
+                + "  dst=\"$ROOTFS$2\"\n"
+                + "  [ -d \"$src\" ] || return 0\n"
+                + "  mkdir -p \"$dst\" 2>/dev/null || true\n"
+                + "  mount --rbind \"$src\" \"$dst\" 2>/dev/null || mount -o rbind \"$src\" \"$dst\" 2>/dev/null || bind_dir \"$src\" \"$2\"\n"
+                + "  mount --make-rslave \"$dst\" 2>/dev/null || mount -o rslave \"$dst\" 2>/dev/null || true\n"
+                + "}\n"
+                + "\n"
+                + "bind_dir /dev /dev\n"
+                + "mount --make-rslave \"$ROOTFS/dev\" 2>/dev/null || mount -o rslave \"$ROOTFS/dev\" 2>/dev/null || true\n"
+                + "bind_dir /dev/pts /dev/pts\n"
+                + "bind_dir /proc /proc\n"
+                + "bind_dir /sys /sys\n"
+                + "mkdir -p \"$ROOTFS/dev/shm\" 2>/dev/null || true\n"
+                + "mount -t tmpfs tmpfs \"$ROOTFS/dev/shm\" 2>/dev/null || bind_dir \"$ROOTFS/tmp\" /dev/shm\n"
+                + "\n"
+                + "bind_dir /system /system\n"
+                + "rbind_dir /apex /apex\n"
+                + "bind_dir /linkerconfig /linkerconfig\n"
+                + "bind_dir /vendor /vendor\n"
+                + "bind_dir /product /product\n"
+                + "bind_dir /system_ext /system_ext\n"
+                + "bind_dir /odm /odm\n"
+                + "bind_dir /data /data\n"
+                + "rbind_dir /storage /storage\n"
+                + "if [ -d /storage/emulated/0 ]; then\n"
+                + "  bind_dir /storage/emulated/0 /sdcard\n"
+                + "elif [ -d /sdcard ]; then\n"
+                + "  bind_dir /sdcard /sdcard\n"
+                + "fi\n"
+                + "\n"
+                + "mkdir -p \"$ROOTFS/root/.agyapp\" \"$ROOTFS/root/.gemini/antigravity-cli\" \"$ROOTFS/root/work\" \"$ROOTFS/tmp\" 2>/dev/null || true\n"
+                + "chmod 1777 \"$ROOTFS/tmp\" 2>/dev/null || true\n"
+                + "if [ -n \"$APP_UID\" ] && [ \"$APP_UID\" != \"0\" ]; then\n"
+                + "  chown \"$APP_UID:$APP_UID\" \"$ROOTFS/root/.agyapp\" \"$ROOTFS/root/.gemini\" \"$ROOTFS/root/.gemini/antigravity-cli\" 2>/dev/null || true\n"
+                + "fi\n"
+                + "\n"
+                + "CHROOT_BIN=\"\"\n"
+                + "for cand in /system/bin/chroot /sbin/chroot /vendor/bin/chroot; do\n"
+                + "  if [ -x \"$cand\" ]; then CHROOT_BIN=\"$cand\"; break; fi\n"
+                + "done\n"
+                + "if [ -z \"$CHROOT_BIN\" ]; then\n"
+                + "  CHROOT_BIN=\"$(command -v chroot 2>/dev/null || true)\"\n"
+                + "fi\n"
+                + "\n"
+                + "ENV_PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/system/bin:/system/xbin:/data/adb/ksu/bin:/data/adb/ap/bin\"\n"
+                + "if [ -n \"$CHROOT_BIN\" ]; then\n"
+                + "  exec \"$CHROOT_BIN\" \"$ROOTFS\" /usr/bin/env -i \\\n"
+                + "    HOME=/root USER=root LOGNAME=root PATH=\"$ENV_PATH\" \\\n"
+                + "    SHELL=/bin/bash LANG=C.UTF-8 TERM=xterm-256color TMPDIR=/tmp \\\n"
+                + "    AGY_APP_UID=\"$APP_UID\" AGY_RUNTIME=chroot \\\n"
+                + "    /bin/sh -c 'cd /root && exec \"$@\"' -- \"$@\"\n"
+                + "else\n"
+                + "  exec toybox chroot \"$ROOTFS\" /usr/bin/env -i \\\n"
+                + "    HOME=/root USER=root LOGNAME=root PATH=\"$ENV_PATH\" \\\n"
+                + "    SHELL=/bin/bash LANG=C.UTF-8 TERM=xterm-256color TMPDIR=/tmp \\\n"
+                + "    AGY_APP_UID=\"$APP_UID\" AGY_RUNTIME=chroot \\\n"
+                + "    /bin/sh -c 'cd /root && exec \"$@\"' -- \"$@\"\n"
+                + "fi\n";
+        replace(chrootExec, script);
+        chmod(chrootExec, 0755);
+    }
+
+    /**
+     * Convenience wrapper for scripts expecting `rish`: inside root chroot we already have real
+     * uid=0 and direct access to /system, /apex and /linkerconfig, so run via /system/bin/sh.
      */
     private void writeRish() throws IOException {
         File dir = new File(rootfs, "opt/agyapp");
-        File dex = new File(dir, "rish_shizuku.dex");
-        try {
-            android.content.pm.ApplicationInfo ai = context.getPackageManager().getApplicationInfo(SHIZUKU, 0);
-            File stampFile = new File(dir, "rish.stamp");
-            String stamp = ai.sourceDir + " " + new File(ai.sourceDir).lastModified();
-            String old = stampFile.exists() ? read(new FileInputStream(stampFile)) : "";
-            if (!stamp.equals(old) || !dex.exists()) {
-                try (java.util.zip.ZipFile apk = new java.util.zip.ZipFile(ai.sourceDir)) {
-                    java.util.zip.ZipEntry e = apk.getEntry("assets/rish_shizuku.dex");
-                    if (e != null) {
-                        mkdirs(dir);
-                        dex.delete();
-                        try (InputStream in = apk.getInputStream(e); OutputStream out = new FileOutputStream(dex)) {
-                            copy(in, out);
-                        }
-                        Os.chmod(dex.getPath(), 0400); // Android 14+ loads only a dex nobody can write
-                        write(stampFile, stamp);
-                    }
-                }
-            }
-        } catch (android.content.pm.PackageManager.NameNotFoundException | ErrnoException | IOException e) {
-            // no Shizuku, or its APK could not be read: rish says so, and nothing else depends on it
-        }
+        mkdirs(dir);
         StringBuilder env = new StringBuilder();
         for (java.util.Map.Entry<String, String> e : System.getenv().entrySet()) {
             String k = e.getKey();
@@ -615,32 +682,12 @@ final class Userland {
             }
         }
         replace(new File(dir, "android.env"), env.toString());
-        // Android's linker reads its namespaces from /linkerconfig, a directory proot may not
-        // bind (apps can read the file, not look at the directory): a copy, made at each boot.
-        File ld = new File("/linkerconfig/ld.config.txt");
-        File copyLd = new File(rootfs, "linkerconfig/ld.config.txt");
-        if (ld.canRead() && ld.length() != copyLd.length()) {
-            File partLd = new File(copyLd.getPath() + ".part");
-            try (InputStream in = new FileInputStream(ld)) {
-                mkdirs(copyLd.getParentFile());
-                try (OutputStream out = new FileOutputStream(partLd)) {
-                    copy(in, out);
-                }
-                if (!partLd.renameTo(copyLd)) partLd.delete();
-            } catch (IOException ignored) {
-                partLd.delete();
-                // rish will say what it misses
-            }
-        }
         File rish = new File(rootfs, "usr/local/bin/rish");
         File rishPart = new File(rish.getPath() + ".part");
         write(rishPart, "#!/bin/sh\n"
-                + "dex=/opt/agyapp/rish_shizuku.dex\n"
-                + "[ -f $dex ] || { echo 'rish: 没有安装 Shizuku' >&2; exit 1; }\n"
                 + ". /opt/agyapp/android.env\n"
-                + "export RISH_APPLICATION_ID=" + context.getPackageName() + "\n"
-                + "exec /system/bin/app_process -Djava.class.path=$dex /system/bin --nice-name=rish "
-                + "rikka.shizuku.shell.ShizukuShellLoader \"$@\"\n");
+                + "export PATH=\"/system/bin:/system/xbin:/vendor/bin:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH\"\n"
+                + "exec /system/bin/sh \"$@\"\n");
         try {
             Os.chmod(rishPart.getPath(), 0755);
         } catch (ErrnoException e) {
@@ -657,8 +704,8 @@ final class Userland {
     private static final Object PREPARING = new Object();
 
     /**
-     * Per-start files: DNS servers of the current network, hosts, and stand-ins for /proc files
-     * Android hides. Each is replaced whole: programs running meanwhile read them.
+     * Per-start files: chroot launcher, DNS servers of the current network, hosts, and helper tools.
+     * Each is replaced whole: programs running meanwhile read them.
      */
     private void prepare() throws IOException {
         synchronized (PREPARING) {
@@ -668,6 +715,7 @@ final class Userland {
 
     private void prepareFiles() throws IOException {
         mkdirs(tmp);
+        writeChrootExec();
         writeRish();
         writeUsbTools();
         Set<String> dns = new LinkedHashSet<>();
@@ -684,18 +732,6 @@ final class Userland {
         for (String d : dns) if (!d.contains("%")) resolv.append("nameserver ").append(d).append('\n');
         replace(new File(rootfs, "etc/resolv.conf"), resolv.toString());
         replace(new File(rootfs, "etc/hosts"), "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n");
-        File procs = new File(base, "proc");
-        mkdirs(procs);
-        int cpus = java.lang.Runtime.getRuntime().availableProcessors();
-        StringBuilder stat = new StringBuilder("cpu  1000 0 1000 100000 0 0 0 0 0 0\n");
-        for (int i = 0; i < cpus; i++) stat.append("cpu").append(i).append(" 100 0 100 10000 0 0 0 0 0 0\n");
-        stat.append("intr 0\nctxt 0\nbtime 0\nprocesses 1\nprocs_running 1\nprocs_blocked 0\n");
-        replace(new File(procs, "stat"), stat.toString());
-        replace(new File(procs, "loadavg"), "0.10 0.10 0.10 1/100 1\n");
-        long up = android.os.SystemClock.elapsedRealtime() / 1000;
-        replace(new File(procs, "uptime"), up + ".00 " + up + ".00\n");
-        replace(new File(procs, "version"), "Linux version " + System.getProperty("os.version") + " (android)\n");
-        replace(new File(procs, "vmstat"), "nr_free_pages 100000\n");
     }
 
     void writeBridge() throws IOException {
@@ -802,11 +838,25 @@ final class Userland {
     int bridgePid() {
         try {
             int pid = Integer.parseInt(read(new FileInputStream(file(HOME + "/.agyapp/bridge.pid"))).trim());
-            String cmd = read(new FileInputStream("/proc/" + pid + "/cmdline"));
-            return cmd.contains("bridge.py") ? pid : 0;
+            if (pid <= 0) return 0;
+            // Under root chroot the bridge runs as uid=0, so app uid cannot read /proc/<pid>/cmdline directly.
+            String out = suCapture("grep -a -q bridge.py /proc/" + pid + "/cmdline 2>/dev/null && echo ok", 3);
+            if (out != null && out.contains("ok")) return pid;
+            try {
+                String cmd = read(new FileInputStream("/proc/" + pid + "/cmdline"));
+                return cmd.contains("bridge.py") ? pid : 0;
+            } catch (IOException e) {
+                return 0;
+            }
         } catch (IOException | NumberFormatException e) {
             return 0;
         }
+    }
+
+    /** Sends a POSIX signal to the running root bridge process. */
+    void signalBridge(int pid, int sig) {
+        if (pid <= 0) return;
+        suCapture("kill -" + sig + " " + pid + " 2>/dev/null || true", 3);
     }
 
     /** The last bytes of a file, whole lines. */

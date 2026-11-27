@@ -112,7 +112,7 @@ final class UsbBridge {
         UsbDeviceConnection held = null;
         try {
             Credentials creds = client.getPeerCredentials();
-            if (creds == null || creds.getUid() != android.os.Process.myUid()) {
+            if (creds == null || (creds.getUid() != android.os.Process.myUid() && creds.getUid() != 0)) {
                 return;
             }
             BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));

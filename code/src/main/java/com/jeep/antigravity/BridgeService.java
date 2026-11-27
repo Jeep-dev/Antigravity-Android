@@ -105,10 +105,10 @@ public final class BridgeService extends Service {
         }
         worker.shutdownNow();
         int pid = userland.bridgePid();
-        if (pid > 0) android.os.Process.sendSignal(pid, 15); // proot ignores SIGTERM: the bridge is told
+        if (pid > 0) userland.signalBridge(pid, 15);
         if (p != null) {
             if (pid > 0) p.destroy();
-            else p.destroyForcibly(); // bridge.pid not written yet: proot ignores SIGTERM
+            else p.destroyForcibly();
         }
         if (wake != null && wake.isHeld()) wake.release();
         super.onDestroy();
@@ -151,8 +151,8 @@ public final class BridgeService extends Service {
     }
 
     /**
-     * Stops the running bridge. proot ignores SIGTERM, so the bridge itself is told: it ends its
-     * conversations and exits, and proot then ends whatever is left under it and exits too.
+     * Stops the running bridge. The bridge runs as real root in chroot, so signals are sent via su:
+     * it ends its conversations and exits, and the isolated mount namespace tears down with it.
      */
     private void stopBridge() {
         Process p;
@@ -161,14 +161,14 @@ public final class BridgeService extends Service {
             proc = null;
         }
         int pid = userland.bridgePid();
-        if (pid > 0) android.os.Process.sendSignal(pid, 15);
+        if (pid > 0) userland.signalBridge(pid, 15);
         if (p == null) {
             if (pid <= 0) return;
             try {
                 long end = System.currentTimeMillis() + 6_000;
                 while (System.currentTimeMillis() < end && userland.bridgePid() == pid) Thread.sleep(100);
                 if (userland.bridgePid() == pid) {
-                    android.os.Process.sendSignal(pid, 9);
+                    userland.signalBridge(pid, 9);
                     long killEnd = System.currentTimeMillis() + 2_000;
                     while (System.currentTimeMillis() < killEnd && userland.bridgePid() == pid) Thread.sleep(100);
                 }
@@ -183,7 +183,7 @@ public final class BridgeService extends Service {
         }
         try {
             if (p.waitFor(6, TimeUnit.SECONDS)) return;
-            android.os.Process.sendSignal(pid, 9);
+            userland.signalBridge(pid, 9);
             if (!p.waitFor(2, TimeUnit.SECONDS)) p.destroyForcibly();
         } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();

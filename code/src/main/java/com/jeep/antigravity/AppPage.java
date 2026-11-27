@@ -122,7 +122,7 @@ final class AppPage extends Part {
                 keepAlive = state;
                 if (state == KeepAlive.SET) toast("已开启后台保活");
                 else if (asked) toast(state == KeepAlive.ON ? "后台保活已经开着" : state == KeepAlive.OFF
-                        ? "没能开启后台保活" : "rish 没有运行：请确认 Shizuku 在运行并已授权本应用");
+                        ? "没能开启后台保活" : "未获得 Root 权限：请在 KernelSU / SukiSU / Magisk 中授权本应用");
                 if ("keep".equals(app.settings.settingsAt)) app.settings.fillSettings(app.settings.launchCache);
             });
         }, "keep-alive").start();
@@ -152,7 +152,7 @@ final class AppPage extends Part {
         // the app checks and sets that itself (KeepAlive); a tap checks again.
         String state = keepChecking ? "检查中…" : keepAlive == UNKNOWN ? "未检查"
                 : keepAlive == KeepAlive.ON || keepAlive == KeepAlive.SET ? "已开启"
-                : keepAlive == KeepAlive.OFF ? "没能开启，点此重试" : "需要 Shizuku，点此重试";
+                : keepAlive == KeepAlive.OFF ? "没能开启，点此重试" : "需要 Root 权限，点此重试";
         sheets.option(keep, R.drawable.ic_check, "后台保活", state, false, () -> keepAlive(true));
     }
 
